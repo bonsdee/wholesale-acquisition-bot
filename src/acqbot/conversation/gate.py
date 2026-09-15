@@ -15,6 +15,40 @@ from acqbot.models import LeadState
 
 MONEY_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d{3,7})")
 YEAR_RE = re.compile(r"\b(19[89]\d|20[0-4]\d)\b")
+KM_RE = re.compile(r"\b(\d{1,3}(?:,\d{3})+|\d{4,7})\s?(?:km|kms|kilometres|kilometers)\b", re.I)
+# Makes the gate recognises when checking that a generated message names only the seller's car.
+KNOWN_MAKES = (
+    "Toyota",
+    "Mazda",
+    "Hyundai",
+    "Kia",
+    "Ford",
+    "Volkswagen",
+    "Subaru",
+    "Mitsubishi",
+    "Nissan",
+    "Honda",
+    "Holden",
+    "Isuzu",
+    "Suzuki",
+    "Jeep",
+    "Tesla",
+    "Lexus",
+    "Audi",
+    "BMW",
+    "Mercedes",
+    "Skoda",
+    "Peugeot",
+    "Renault",
+    "Volvo",
+    "Porsche",
+    "Land Rover",
+    "MG",
+    "LDV",
+    "GWM",
+    "BYD",
+)
+MAKE_RE = re.compile(r"\b(" + "|".join(re.escape(m) for m in KNOWN_MAKES) + r")\b", re.I)
 COMMITMENT = re.compile(
     r"\b(guarantee[ds]?|we will (definitely )?buy|we'?ll (definitely )?buy|committed to (buy|purchas)|purchase is confirmed|"
     r"deal is done|it'?s a done deal|cash (today|now|in hand)|unconditional)\b",
@@ -76,6 +110,10 @@ class GateContext:
     allowed_years: set[int] = field(default_factory=set)  # e.g. a contradicted claimed year being queried
     max_length: int = 2000
     today: date = field(default_factory=date.today)
+    # Fact-sheet consistency (7: "no vehicle fact absent from the fact store") — used for generated text.
+    vehicle_make: str | None = None
+    vehicle_odometer_km: int | None = None
+    allowed_odometers: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -127,6 +165,20 @@ def validate(body: str, ctx: GateContext) -> GateResult:
     stray = sorted(years - ok_years)
     if stray:
         v.append(f"year not in the fact sheet: {stray}")
+
+    kms = {int(m.group(1).replace(",", "")) for m in KM_RE.finditer(body)}
+    ok_kms = set(ctx.allowed_odometers)
+    if ctx.vehicle_odometer_km is not None:
+        ok_kms.add(int(ctx.vehicle_odometer_km))
+    stray_kms = sorted(kms - ok_kms)
+    if stray_kms:
+        v.append(f"odometer figure not in the fact sheet: {stray_kms}")
+
+    if ctx.vehicle_make:
+        makes = {m.group(1).lower() for m in MAKE_RE.finditer(body)}
+        other = sorted(makes - {ctx.vehicle_make.lower()})
+        if other:
+            v.append(f"vehicle make not in the fact sheet: {other}")
 
     if len(body) > ctx.max_length:
         v.append(f"length {len(body)} exceeds channel maximum {ctx.max_length}")

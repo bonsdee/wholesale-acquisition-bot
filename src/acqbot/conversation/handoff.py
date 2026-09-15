@@ -135,6 +135,8 @@ def build_packet(
         flags.append("phone_captured")
     if (sheet.get("rego_status") or {}).get("status") in {"expired", "unregistered"}:
         flags.append("rego_not_current")
+    # Section 9: "the flags array carries anything the model noticed that was not a structured field".
+    flags += [f"seller_note: {n}" for n in (sheet.get("seller_notes") or [])[:10]]
     channel = None
     for t in lead.threads:
         channel = t.channel.value

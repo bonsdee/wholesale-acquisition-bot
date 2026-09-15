@@ -98,10 +98,16 @@ class Extraction:
     flags: set[str] = field(
         default_factory=set
     )  # legal, deceased, distress, minor_or_no_authority, human_question, hostile, stop
-    intents: set[str] = field(default_factory=set)  # accept, reject, counter, price_question
+    intents: set[str] = field(default_factory=set)  # accept, reject, counter, price_question, question, defer
     counter_price: int | None = None
     phone: str | None = None
     parsed_pending: bool = False  # the field we asked for was understood
+    # Phase 4 additions — populated by the model extractor, empty on the rule-based path.
+    seller_question: str | None = None
+    notes: list[str] = field(default_factory=list)
+    low_confidence: dict[str, Any] = field(default_factory=dict)  # field → raw value we chose not to record
+    generator: str = "rules"  # rules | model | rules_fallback (model call failed)
+    model_call_id: str | None = None
 
 
 def _money_to_int(m: re.Match) -> int | None:

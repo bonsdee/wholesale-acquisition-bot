@@ -196,15 +196,32 @@ def demo(
     auto_offer: Annotated[
         bool, typer.Option(help="Let the automation present and concede (Phase 5 mode) instead of a human.")
     ] = False,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            help="Language model for this run: off (scripted), fake (deterministic, no network), anthropic. "
+            "Default: whatever ACQBOT_LLM_PROVIDER / the API key say."
+        ),
+    ] = None,
     quiet: bool = False,
 ) -> None:
     """Run a scripted seller through the whole pipeline on the Console transport and print the transcript."""
     import acqbot.queue.handlers  # noqa: F401
     from acqbot.demo import run_demo
 
-    run = run_demo(scenario, seller, seed=seed, echo=False, human_presents=not auto_offer)
+    if model == "anthropic":
+        from acqbot.config import get_settings
+        from acqbot.llm.registry import missing_key_reason
+
+        reason = missing_key_reason(get_settings().model_copy(update={"llm_provider": "anthropic"}))
+        if reason:
+            typer.echo(reason)
+            raise typer.Exit(code=1)
+    run = run_demo(scenario, seller, seed=seed, echo=False, human_presents=not auto_offer, model=model)
     if not quiet:
         typer.echo(run.render())
+        gens = [m.get("generator") for m in run.transcript if m["direction"] == "outbound"]
+        typer.echo("\noutbound by generator: " + ", ".join(f"{g}={gens.count(g)}" for g in sorted(set(gens))))
 
 
 @app.command()
@@ -212,11 +229,17 @@ def chat(
     scenario: str = "clean",
     seed: int = 7,
     auto_offer: bool = False,
+    model: Annotated[
+        str | None, typer.Option(help="off (scripted) | fake (no network) | anthropic. Default: environment.")
+    ] = None,
 ) -> None:
     """Interactive: you play the seller on the Console transport. Type 'quit' to stop."""
     import os
 
     import acqbot.queue.handlers  # noqa: F401
+
+    if model is not None:
+        os.environ["ACQBOT_LLM_PROVIDER"] = model
     from acqbot.conversation.service import Conversation
     from acqbot.db import session_scope
     from acqbot.demo import SELLER_ID
@@ -228,27 +251,40 @@ def chat(
 
     if auto_offer:
         os.environ["ACQBOT_AUTO_PRESENT_OFFER"] = "true"
-        from acqbot.config import reset_settings_cache
+    from acqbot.config import get_settings, reset_settings_cache
+    from acqbot.llm.registry import missing_key_reason
 
-        reset_settings_cache()
+    reset_settings_cache()
+    reason = missing_key_reason(get_settings())
+    if reason:
+        typer.echo(reason)
+        raise typer.Exit(code=1)
+    typer.echo(f"language model: {get_settings().resolved_llm_provider}")
 
     console = reset_console_transport(echo=True)
     payload = make_lead(scenario, seed=seed)
-    payload["seller"]["platform_id"] = SELLER_ID
+    # A fresh seller identity per run: the 90-day dedupe is keyed on seller + vehicle, so re-running
+    # `chat` with the same seed would otherwise be a duplicate of the previous run's lead.
+    seller_id = f"{SELLER_ID}-{uuid.uuid4().hex[:8]}"
+    payload["seller"]["platform_id"] = seller_id
     with session_scope() as s:
-        lead_id = ingest_lead(s, payload).lead_id
+        result = ingest_lead(s, payload)
+    if result.status == "duplicate":
+        typer.echo(f"this lead is a duplicate of {result.duplicate_of} — try another --seed")
+        raise typer.Exit(code=1)
+    lead_id = result.lead_id
     drain("chat")
     vc = payload["vehicle_claimed"]
     typer.echo(
         f"lead {lead_id}: {vc['year']} {vc['make']} {vc['model']} — rego {vc['rego']} vin {vc['vin']} asking ${vc['asking_price_aud']:,}"
     )
-    typer.echo("You are the seller. First message opens the thread via the m.me link.\n")
+    typer.echo("You are the seller. First message opens the thread via the m.me link. Type 'quit' to stop.\n")
     first = True
     while True:
         text = typer.prompt("seller")
         if text.strip().lower() in {"quit", "exit"}:
             break
-        console.inject(SELLER_ID, text, referral_ref=str(lead_id) if first else None)
+        console.inject(seller_id, text, referral_ref=str(lead_id) if first else None)
         first = False
         for msg in console.poll(
             __import__("datetime").datetime(2000, 1, 1, tzinfo=__import__("datetime").UTC)
@@ -259,9 +295,15 @@ def chat(
         drain("chat")
         with session_scope() as s:
             lead = s.get(Lead, lead_id)
+            if lead is None:
+                typer.echo("lead vanished — stopping")
+                raise typer.Exit(code=1)
             if lead.state.value == "PRICED" and not auto_offer:
                 if typer.confirm("Lead is PRICED. Present the opening offer as the human?", default=True):
                     Conversation(s, console).present_offer(lead, LadderStep.OPENING, presented_by="human:you")
+            elif lead.state.value in {"HUMAN", "HANDOFF", "ARCHIVED", "REJECTED", "TERMINATED"}:
+                typer.echo(f"conversation ended in {lead.state.value} — automation has stopped for this lead")
+                break
         drain("chat")
 
 
@@ -279,6 +321,124 @@ def queue() -> None:
         typer.echo(f"{kind:20s} {status.value:8s} {n}")
     if not rows:
         typer.echo("queue empty")
+
+
+@app.command("model-check")
+def model_check() -> None:
+    """Verify the language-model configuration with one tiny call to each configured model."""
+    from acqbot.config import get_settings
+    from acqbot.llm.client import ModelError, ModelRequest
+    from acqbot.llm.registry import get_model_client, missing_key_reason
+
+    cfg = get_settings()
+    typer.echo(f"provider: {cfg.resolved_llm_provider} (ACQBOT_LLM_PROVIDER={cfg.llm_provider})")
+    reason = missing_key_reason(cfg)
+    if reason:
+        typer.echo(reason)
+        raise typer.Exit(code=1)
+    client = get_model_client(cfg)
+    if client is None:
+        typer.echo(
+            "language model is off — set ACQBOT_ANTHROPIC_API_KEY in .env (or ACQBOT_LLM_PROVIDER=fake)"
+        )
+        raise typer.Exit(code=1)
+    if client.name == "fake":
+        typer.echo("fake client: deterministic, no network — nothing to verify")
+        return
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    for purpose, model in (("extract", cfg.extraction_model), ("generate", cfg.conversation_model)):
+        req = ModelRequest(
+            purpose=purpose,
+            model=model,
+            system="Reply with JSON matching the schema.",
+            messages=[{"role": "user", "content": "Set ok to true."}],
+            schema=schema,
+            max_tokens=64,
+            effort=cfg.llm_effort,
+        )
+        try:
+            resp = client.complete(req)
+        except ModelError as exc:
+            typer.echo(f"{purpose:9s} {model}: FAILED — {exc}")
+            raise typer.Exit(code=1) from exc
+        typer.echo(
+            f"{purpose:9s} {resp.model}: ok={resp.parsed and resp.parsed.get('ok')} "
+            f"{resp.latency_ms} ms, {resp.input_tokens} in / {resp.output_tokens} out"
+        )
+
+
+@app.command("model-calls")
+def model_calls(lead_id: str, limit: int = 50) -> None:
+    """List the model calls made for a lead (purpose, model, tokens, latency, errors)."""
+    from sqlalchemy import select
+
+    from acqbot.db import session_scope
+    from acqbot.models import ModelCall
+
+    with session_scope() as s:
+        rows = list(
+            s.scalars(
+                select(ModelCall)
+                .where(ModelCall.lead_id == uuid.UUID(lead_id))
+                .order_by(ModelCall.at.desc())
+                .limit(limit)
+            )
+        )
+        for c in reversed(rows):
+            status = (
+                f"ERROR {c.error[:60]}"
+                if c.error
+                else f"{c.input_tokens or 0} in / {c.output_tokens or 0} out"
+            )
+            typer.echo(
+                f"{c.at:%H:%M:%S}  {c.purpose:9s} {c.model:34s} {c.latency_ms or 0:5d} ms  {status}  {c.call_id}"
+            )
+    if not rows:
+        typer.echo("no model calls for this lead")
+
+
+@app.command("prompt")
+def prompt(ref: str) -> None:
+    """Reconstruct the exact prompt behind an outbound message (msg_id) or a model call (call_id)."""
+    from sqlalchemy import select
+
+    from acqbot.db import session_scope
+    from acqbot.models import Message, ModelCall
+
+    with session_scope() as s:
+        call = s.get(ModelCall, uuid.UUID(ref))
+        if call is None:
+            msg = s.get(Message, uuid.UUID(ref))
+            if msg is None:
+                typer.echo("no message or model call with that id")
+                raise typer.Exit(code=1)
+            if not msg.prompt_hash:
+                typer.echo("that message has no prompt hash")
+                raise typer.Exit(code=1)
+            call = s.scalars(select(ModelCall).where(ModelCall.prompt_hash == msg.prompt_hash)).first()
+            if call is None:
+                notes = msg.validation_notes or {}
+                typer.echo(
+                    f"message was scripted ({msg.model_version}, template {notes.get('template')}); "
+                    "no model prompt to show"
+                )
+                raise typer.Exit(code=0)
+        typer.echo(f"call {call.call_id}  purpose={call.purpose}  model={call.model}  {call.prompt_version}")
+        typer.echo(f"prompt_hash {call.prompt_hash}\n")
+        typer.echo("=== SYSTEM ===")
+        typer.echo(call.request["system"])
+        typer.echo("\n=== MESSAGES ===")
+        for m in call.request["messages"]:
+            typer.echo(f"[{m['role']}] {m['content']}")
+        typer.echo("\n=== RESPONSE ===")
+        typer.echo(json.dumps((call.response or {}).get("parsed"), indent=2, ensure_ascii=False))
+        if call.error:
+            typer.echo(f"\nERROR: {call.error}")
 
 
 if __name__ == "__main__":  # pragma: no cover

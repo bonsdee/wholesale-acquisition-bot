@@ -5,9 +5,9 @@ private-seller leads, conducts a structured discovery conversation, produces a b
 presents a firm offer within pre-authorised limits, and hands a complete deal packet to a human
 closer.
 
-**Status** Phases 1–3 of 6 complete · 139 tests · Not production ready — see
+**Status** Phases 1–4 of 6 complete · 187 tests · Not production ready — see
 [Before going live](#before-going-live)
-**Stack** Python 3.11+ · FastAPI · PostgreSQL · SQLAlchemy 2 · Alembic
+**Stack** Python 3.11+ · FastAPI · PostgreSQL · SQLAlchemy 2 · Alembic · Claude API
 **Jurisdiction** Victoria, Australia — LMCT-regulated activity
 
 ---
@@ -55,6 +55,7 @@ flowchart TD
 | State machine | Deal stage computed from collected facts | `conversation/state.py` |
 | Validation gate | Every outbound message checked before it is sent | `conversation/gate.py` |
 | Orchestrator | Per-message processing loop | `conversation/service.py` |
+| Language model | Fact extraction and discovery replies, behind the gate; every call traced | `llm/`, `conversation/extract_model.py`, `conversation/compose.py` |
 | Transport | Channel abstraction the orchestrator cannot see through | `transport/` |
 | Queue | Durable Postgres-backed jobs with retry and backoff | `queue/` |
 
@@ -77,6 +78,46 @@ four ladder values. This is code at the send boundary, not an instruction in a p
 cannot be updated or deleted — enforced by database triggers, so the guarantee survives direct
 access to the database. Fact supersession, offer outcomes and escalation resolutions are
 write-once. A disputed transaction can be reconstructed exactly as it happened.
+
+## The model in the loop
+
+Two models with two jobs, neither of which is deciding anything. On every inbound message a small
+model (Haiku) reads the seller's words and returns facts in a fixed format; code coerces each value
+into the fact vocabulary or drops it, and the regex screens from Phase 3 still run underneath as a
+floor — a legal threat the model misses is still caught. The state machine then recomputes the
+stage from the fact store exactly as before.
+
+The reply is planned by code: the planner decides what the next message *does* — ask for the
+odometer, clarify a vague answer, raise a contradiction, ask for the remaining photos, say the
+checks are running — and hands that instruction, with the scripted wording attached, to a stronger
+model (Sonnet). The model writes it in its own words. The gate checks the draft; if it fails, the
+violations go back to the model for one rewrite; if that fails too, the scripted wording is sent
+instead. The model can neither block a conversation nor send an unchecked sentence.
+
+What the model holds is deliberately narrow. Its context carries the stage, the outstanding
+fields, the fact sheet split into verified / claimed / contradicted, the last fifteen turns
+verbatim with older turns folded into a rolling summary, and the instruction for this turn. It
+never carries the valuation or the ladder — there is no code path that puts them there — so a
+figure it does not hold cannot be leaked. In this phase it writes discovery messages only; the
+opening, the disclosure, the "are you a bot?" answer, every offer and every closing line remain
+scripted.
+
+Every call is stored whole in `model_calls` — system prompt, messages, schema, response, tokens,
+latency, error — under an immutable trigger, and every generated message records the model,
+the prompt version and the hash of the exact prompt that produced it. `acqbot prompt <msg_id>`
+reconstructs that prompt on demand.
+
+```powershell
+# .env:  ACQBOT_ANTHROPIC_API_KEY=sk-ant-...     (console.anthropic.com → API keys)
+uv run acqbot model-check                          # verifies the key and both models with one tiny call each
+uv run acqbot demo --model anthropic --seller accept
+uv run acqbot chat --model anthropic               # you play the seller, the model writes the replies
+uv run acqbot demo --model fake                    # the whole Phase 4 path with no network (tests use this)
+uv run acqbot model-calls <lead_id>                # trace: purpose, model, tokens, latency, errors
+uv run acqbot prompt <msg_id>                      # the exact prompt behind an outbound message
+```
+
+Without `ACQBOT_ANTHROPIC_API_KEY` the system runs on scripted templates exactly as in Phase 3.
 
 ## Compliance posture
 
@@ -105,13 +146,14 @@ deliberately not implemented. See `docs/DECISIONS.md` (decision 1).
 ### Install
 
 ```powershell
-uv sync --extra dev
+uv sync        # runtime and dev tools (pytest, ruff) — dev tools are a uv dependency group
 ```
 
 ### Database
 
 Take a connection string from your provider and adjust it in two ways: the scheme must be
-`postgresql+psycopg://` (this project uses psycopg 3, not psycopg2), and `?sslmode=require` should
+`postgresql+pg8000://` (a pure-Python driver — no native DLL to be blocked; the earlier
+`postgresql+psycopg://` scheme is accepted and rewritten), and `?sslmode=require` should
 be appended for any hosted database.
 
 On Supabase, use the **Session pooler** connection rather than the direct one. Direct connections
@@ -173,7 +215,7 @@ uv run acqbot demo --scenario contradiction --seller accept --auto-offer
 
 ```powershell
 uv run acqbot serve      # API on http://127.0.0.1:8000 — interactive docs at /docs
-uv run acqbot worker     # job worker: enrichment, valuation, sends, expiries
+uv run acqbot worker     # job worker: enrichment, valuation, inbound messages, sends, expiries
 ```
 
 ### Lead intake and inspection
@@ -196,7 +238,7 @@ All endpoints under `/admin` require the `x-admin-token` header and are disabled
 |---|---|
 | `GET /admin/escalations` | Open work queue |
 | `POST /admin/escalations/{id}/resolve` | Close an item; optionally return the lead to automation |
-| `GET /admin/leads/{id}/transcript` | Full message history with template version and gate result |
+| `GET /admin/leads/{id}/transcript` | Full message history with template or model version and gate result |
 | `GET /admin/leads/{id}/valuation` | Latest valuation with its complete input snapshot |
 | `POST /admin/leads/{id}/facts` | Record a verified fact; triggers revaluation |
 | `POST /admin/leads/{id}/present-offer` | Present a ladder step, or an above-ladder amount as a human decision |
@@ -214,6 +256,11 @@ webhook carries the lead id that links the conversation. Configure the webhook a
 The Messenger Platform cannot open a conversation with someone who has not messaged the Page
 first, and outbound is limited to twenty-four hours after the seller's last message. Conversations
 that go quiet beyond that window continue over SMS.
+
+Both webhooks verify, parse and enqueue; the worker runs the conversation loop. The webhook
+therefore answers in milliseconds regardless of model latency, a redelivered event is deduplicated
+by message id, and a reply that fails on the way out is retried without recording the seller's
+message twice. Run one worker per deployment unless per-thread ordering is added to the queue.
 
 ---
 
@@ -259,14 +306,16 @@ src/acqbot/
   facts/                 Field registry and the append-only fact store
   enrichment/            Provider protocols, deterministic stubs, enrichment pipeline
   valuation/             Engine (pure), service (persistence), calibration harness
-  conversation/          State machine, extraction, templates, gate, orchestrator, handoff
+  conversation/          State machine, extraction (rules + model), planner/composer, templates, gate,
+                         orchestrator, history, handoff
+  llm/                   Model client, prompts, output schemas and coercion, trace capture, fakes
   transport/             Transport protocol; console, Messenger, SMS
   queue/                 Postgres-backed job queue and worker
   api/                   Lead webhook, channel webhooks, admin console
   simulator.py           Lead generator standing in for the upstream platform
   demo.py                Scripted seller runs
   cli.py                 Command line
-alembic/versions/        0001 schema and append-only triggers · 0002 handoff packets
+alembic/versions/        0001 schema and append-only triggers · 0002 handoff packets · 0003 model calls
 docs/                    DECISIONS.md · PHASES.md
 fixtures/                Synthetic calibration data
 tests/
@@ -280,12 +329,19 @@ The suite drops and recreates the schema on the database it is pointed at, and r
 unless the database name contains `test`. Use a separate database — never one holding real leads.
 
 ```powershell
-$env:ACQBOT_TEST_DATABASE_URL = "postgresql+psycopg://<user>:<password>@<host>:5432/postgres_test?sslmode=require"
+$env:ACQBOT_TEST_DATABASE_URL = "postgresql+pg8000://<user>:<password>@<host>:5432/postgres_test?sslmode=require"
 uv run pytest
 ```
 
 End-to-end tests drive scripted sellers through the complete pipeline over the console transport
-and assert gate discipline on every outbound message.
+and assert gate discipline on every outbound message — once on scripted templates and once through
+the Phase 4 model path with a deterministic fake client. Two tests call the real Claude API and are
+skipped unless `ACQBOT_ANTHROPIC_API_KEY` is set:
+
+```powershell
+$env:ACQBOT_ANTHROPIC_API_KEY = "sk-ant-..."
+uv run pytest tests/test_live_model.py -v
+```
 
 ### Migrations
 
@@ -313,7 +369,7 @@ uv run ruff check src tests
 | 1 | Ingestion, data model, fact store | Complete |
 | 2 | Valuation engine, offline | Built; **not calibrated** |
 | 3 | State machine, scripted messages, transport | Complete |
-| 4 | Language model for discovery | Not started |
+| 4 | Language model for discovery | Complete; not yet run against a real seller |
 | 5 | Automated offer presentation | Behind `ACQBOT_AUTO_PRESENT_OFFER`; approval workflow outstanding |
 | 6 | SMS transition and nudge sequences | Not started |
 
@@ -345,8 +401,15 @@ number for two-way SMS.
 **Configuration is still placeholder.** Dealership name, licence number, buyer identities, target
 margin by segment, transport cost, high-value escalation threshold and the human response SLA.
 
-**Observability is not built.** Full language-model trace capture is required before Phase 4 ships,
-along with error tracking.
+**The prompts have not met a real seller.** Every model call is traced, the gate and the scripted
+fallback are exercised in tests, and the live smoke test passes against the API — but the wording
+has only been tested on scripted sellers. Run `acqbot chat --model anthropic` and read
+`model_calls` for a few dozen conversations before pointing it at Messenger. Error tracking
+(Sentry) is still to be added.
+
+**The process notes are placeholders.** `llm/knowledge.py` is the only source the model may answer
+process questions from (inspection, payment, pick-up). Until the business confirms them, the model
+defers everything else to the named agent.
 
 Confirmation that the dealer licence covers automated first contact as designed should be obtained
 from someone qualified to give it.
@@ -369,6 +432,12 @@ from someone qualified to give it.
 | `ACQBOT_MIN_PHOTOS` | Photographs required to exit discovery | 6 |
 | `ACQBOT_HUMAN_SLA_HOURS` | Escalation and handoff response target | 4 |
 | `ACQBOT_*_PROVIDER` | Enrichment provider selection | stub |
+| `ACQBOT_ANTHROPIC_API_KEY` | Enables the language model | unset |
+| `ACQBOT_LLM_PROVIDER` | `auto` · `anthropic` · `fake` · `off` | auto |
+| `ACQBOT_EXTRACTION_MODEL` · `_CONVERSATION_MODEL` | Which model reads, which model writes | Haiku 4.5 · Sonnet 5 |
+| `ACQBOT_LLM_GATE_RETRIES` | Rewrites allowed after a gate rejection | 1 |
+| `ACQBOT_HISTORY_VERBATIM_TURNS` | Turns kept verbatim before summarising | 15 |
+| `ACQBOT_FACT_MIN_CONFIDENCE` | Below this a model-extracted fact is not recorded | 0.7 |
 
 See `.env.example` for the complete list.
 

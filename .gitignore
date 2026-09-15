@@ -1,7 +1,29 @@
+# Environment — never commit; contains the database password and webhook secrets
+.env
+.env.local
+.env.*.local
+
+# Python
 .venv/
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
 .pytest_cache/
 .ruff_cache/
-*.egg-info/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors and OS
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local scratch
+*.log
+scratch/

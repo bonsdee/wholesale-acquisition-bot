@@ -24,6 +24,30 @@ class InboundMessage:
     referral_ref: str | None = None  # the ?ref= value from an m.me link
     raw: dict[str, Any] = field(default_factory=dict)
 
+    def to_payload(self) -> dict[str, Any]:
+        """JSON-safe form for the job queue (the webhook enqueues, the worker handles)."""
+        return {
+            "channel": self.channel.value,
+            "external_id": self.external_id,
+            "body": self.body,
+            "external_msg_id": self.external_msg_id,
+            "attachments": self.attachments,
+            "received_at": self.received_at.isoformat(),
+            "referral_ref": self.referral_ref,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> InboundMessage:
+        return cls(
+            channel=Channel(payload["channel"]),
+            external_id=payload["external_id"],
+            body=payload.get("body") or "",
+            external_msg_id=payload.get("external_msg_id"),
+            attachments=list(payload.get("attachments") or []),
+            received_at=datetime.fromisoformat(payload["received_at"]),
+            referral_ref=payload.get("referral_ref"),
+        )
+
 
 @dataclass
 class MessageReceipt:

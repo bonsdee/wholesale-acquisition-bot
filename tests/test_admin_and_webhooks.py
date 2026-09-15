@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from acqbot.api.app import create_app
 from acqbot.db import session_scope
 from acqbot.demo import run_demo
-from acqbot.models import Lead, LeadState
+from acqbot.models import Lead, LeadState, Message
 from acqbot.queue.worker import drain
 from acqbot.transport.registry import reset_console_transport
 
@@ -105,7 +105,7 @@ def test_resolve_escalation_returns_lead_to_automation(client):
 
 def test_messenger_webhook_verify_and_inbound(client, monkeypatch):
     console = reset_console_transport()
-    monkeypatch.setattr("acqbot.api.webhooks.get_transport", lambda channel: console)
+    monkeypatch.setattr("acqbot.transport.registry.get_transport", lambda channel: console)  # job handlers
 
     r = client.get(
         "/webhooks/messenger",
@@ -155,15 +155,25 @@ def test_messenger_webhook_verify_and_inbound(client, monkeypatch):
         content=body,
         headers={"X-Hub-Signature-256": sig, "Content-Type": "application/json"},
     )
-    assert r.status_code == 200 and r.json()["results"][0]["action"] == "opening"
+    assert r.status_code == 200 and r.json()["received"] == 1 and len(r.json()["queued"]) == 1
+    assert console.last_sent("psid-77") is None  # nothing happens on the webhook itself
+    # A redelivery of the same event is deduplicated by message id.
+    r2 = client.post(
+        "/webhooks/messenger",
+        content=body,
+        headers={"X-Hub-Signature-256": sig, "Content-Type": "application/json"},
+    )
+    assert r2.json()["queued"] == ["duplicate"]
+    drain("test")
     assert console.last_sent("psid-77") and "automated assistant" in console.last_sent("psid-77")
     with session_scope() as s:
         assert s.get(Lead, lead_id).state == LeadState.CONTACTED
+        inbound = [m for m in s.query(Message).filter_by(lead_id=lead_id) if m.direction.value == "inbound"]
+        assert len(inbound) == 1
 
 
 def test_unlinked_thread_is_listed_and_linkable(client, monkeypatch):
     console = reset_console_transport()
-    monkeypatch.setattr("acqbot.api.webhooks.get_transport", lambda channel: console)
     monkeypatch.setattr("acqbot.transport.registry.get_transport", lambda channel: console)  # job handlers
     event = {
         "object": "page",
@@ -174,7 +184,8 @@ def test_unlinked_thread_is_listed_and_linkable(client, monkeypatch):
     body = json.dumps(event).encode()
     sig = "sha256=" + hmac.new(b"appsecret", body, hashlib.sha256).hexdigest()
     r = client.post("/webhooks/messenger", content=body, headers={"X-Hub-Signature-256": sig})
-    assert r.json()["results"][0]["action"] == "unlinked"
+    assert r.json()["received"] == 1
+    drain("test")
     unlinked = client.get("/admin/threads/unlinked", headers=ADMIN).json()
     assert any(t["external_id"] == "psid-orphan" for t in unlinked)
 

@@ -3,17 +3,19 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 from acqbot.config import get_settings
+from acqbot.db import engine_args
 from acqbot.models import Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# ACQBOT_DATABASE_URL always wins over alembic.ini.
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# ACQBOT_DATABASE_URL always wins over alembic.ini; the URL is normalised for the driver the app uses.
+DB_URL, CONNECT_ARGS = engine_args(get_settings().database_url)
+config.set_main_option("sqlalchemy.url", DB_URL.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -26,9 +28,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}), prefix="sqlalchemy.", poolclass=pool.NullPool
-    )
+    connectable = create_engine(DB_URL, connect_args=CONNECT_ARGS, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
         with context.begin_transaction():

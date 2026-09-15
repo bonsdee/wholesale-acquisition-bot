@@ -178,3 +178,11 @@ def test_gate_discipline_across_seeds(seed):
     run = run_demo("clean", "negotiate", seed=seed, human_presents=False)
     assert run.final_state in {"HANDOFF", "HUMAN", "TERMINATED"}
     _assert_gate_discipline(run)
+
+
+def test_quoting_our_figure_back_with_pushback_is_a_counter_not_a_yes():
+    run = run_demo("clean", "quote_back", seed=42, human_presents=False)
+    triggers = [h["trigger"] for h in run.state_log]
+    assert "seller_countered" in triggers and "offer_presented:step_1" in triggers
+    assert run.final_state == "HANDOFF" and [o["step"] for o in run.offers] == ["opening", "step_1"]
+    assert run.offers[0]["outcome"] == "superseded" and run.offers[1]["outcome"] == "accepted"

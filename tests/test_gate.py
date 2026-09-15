@@ -14,7 +14,28 @@ def ctx(stage, **kw):
 def test_no_figures_before_priced():
     r = validate("We could do around $17,000 for it", ctx(LeadState.DISCOVERY))
     assert not r.ok and any("before PRICED" in v for v in r.violations)
-    assert validate("Odometer 84,500 km, two keys, 2019 model", ctx(LeadState.DISCOVERY)).ok
+    assert validate(
+        "Odometer 84,500 km, two keys, 2019 model", ctx(LeadState.DISCOVERY, vehicle_odometer_km=84_500)
+    ).ok
+
+
+def test_generated_text_may_only_name_facts_in_the_sheet():
+    # Section 7 gate: "no vehicle fact absent from the fact store".
+    r = validate("So that's 92,000 km on the clock?", ctx(LeadState.DISCOVERY, vehicle_odometer_km=84_500))
+    assert not r.ok and any("odometer figure" in v for v in r.violations)
+    r = validate("Great, 84,500 km on the clock", ctx(LeadState.DISCOVERY))  # sheet has no odometer at all
+    assert not r.ok and any("odometer figure" in v for v in r.violations)
+    # A contradiction query may quote both values.
+    assert validate(
+        "The listing said 84,500 km but the photo shows 92,000 km — which is right?",
+        ctx(LeadState.DISCOVERY, vehicle_odometer_km=92_000, allowed_odometers={84_500, 92_000}),
+    ).ok
+    r = validate("Nice Toyota — how many keys come with it?", ctx(LeadState.DISCOVERY, vehicle_make="Mazda"))
+    assert not r.ok and any("vehicle make" in v for v in r.violations)
+    assert validate("How many keys come with the Mazda?", ctx(LeadState.DISCOVERY, vehicle_make="Mazda")).ok
+    assert validate(
+        "How many keys come with the Mazda?", ctx(LeadState.DISCOVERY)
+    ).ok  # make unknown: no check
 
 
 def test_figures_must_be_on_the_ladder():

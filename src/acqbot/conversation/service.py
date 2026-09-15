@@ -1,12 +1,14 @@
-"""Conversation orchestrator — Sections 5, 7 and 8, without a language model (Phase 3).
+"""Conversation orchestrator — Sections 5, 7 and 8.
 
-Per inbound message (Figure 4, deterministic parts):
+Per inbound message (Figure 4):
     [1] persist to the append-only thread store
-    [2] extract structured facts and screens (rule-based here; a small model in Phase 4)
+    [2] extract structured facts and screens — the extraction model with the regex screens as a
+        floor (Phase 4), or the regex parsers alone when no model is configured (Phase 3)
     [3] recompute the state machine position from the fact store
-    [4]–[5] pick the next scripted message for the stage
-    [6] validation gate — even templates go through it
-    [7] send via the transport and log the outbound with its template version
+    [4] the planner decides what the next message does (a Directive carrying scripted wording)
+    [5] the conversation model writes it — discovery messages only in Phase 4 — or the wording is used as-is
+    [6] validation gate — every outbound, scripted or generated; one rewrite, then the script
+    [7] send via the transport and log the outbound with its model or template version
 
 Escalation triggers (5.2) route to a human with the pending response discarded. The one exception
 is the direct "are you a bot?" question, which gets the plain answer Section 8 requires and is then
@@ -27,15 +29,28 @@ from sqlalchemy.orm import Session
 
 from acqbot.config import Settings, get_settings
 from acqbot.conversation import templates as T
-from acqbot.conversation.extract import Extraction, extract
+from acqbot.conversation.compose import (
+    Composer,
+    Directive,
+    ask_field_instruction,
+    clarify_instruction,
+    contradiction_instruction,
+    photos_partial_instruction,
+    verification_wait_instruction,
+)
+from acqbot.conversation.extract import PUSHBACK, REJECT, Extraction, extract
+from acqbot.conversation.extract_model import ExtractionContext, ModelExtractor
 from acqbot.conversation.gate import GateContext, validate
 from acqbot.conversation.handoff import write_packet
+from acqbot.conversation.history import as_turns
 from acqbot.conversation.state import PRICE_VISIBLE_STATES, Signals, StageView, compute_stage
 from acqbot.conversation.transitions import create_task, escalate, transition
 from acqbot.enrichment import catalog
 from acqbot.facts.fields import STATED_CONFIDENCE, spec_for
 from acqbot.facts.store import FactSheet, fact_sheet, record_fact
 from acqbot.ingestion.service import request_reenrichment
+from acqbot.llm.client import ModelClient
+from acqbot.llm.registry import get_model_client
 from acqbot.models import (
     Direction,
     Escalation,
@@ -69,6 +84,8 @@ LADDER_ORDER = [
     LadderStep.STEP_1,
     LadderStep.STEP_2,
 ]  # floor is not reachable by automation
+# Fact-store rows that are conversation bookkeeping, not vehicle facts: never count as progress.
+BOOKKEEPING_FIELDS = ("seller_notes", "deferred_fields")
 
 
 @dataclass
@@ -89,11 +106,19 @@ def agent_for(lead: Lead, settings: Settings) -> str:
 
 
 class Conversation:
-    def __init__(self, session: Session, transport: Transport, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        session: Session,
+        transport: Transport,
+        settings: Settings | None = None,
+        model: ModelClient | None = None,
+    ) -> None:
         self.s = session
         self.t = transport
         self.cfg = settings or get_settings()
+        self.model = model if model is not None else get_model_client(self.cfg)
         self._last_inbound_text: str | None = None
+        self._last_escalation: str | None = None
 
     # ------------------------------------------------------------------ threads
 
@@ -221,7 +246,9 @@ class Conversation:
         from acqbot.models import StateLog, VehicleFact
 
         last_fact = self.s.scalar(
-            select(func.max(VehicleFact.recorded_at)).where(VehicleFact.lead_id == lead.lead_id)
+            select(func.max(VehicleFact.recorded_at)).where(
+                VehicleFact.lead_id == lead.lead_id, VehicleFact.field.notin_(BOOKKEEPING_FIELDS)
+            )
         )
         last_state = self.s.scalar(select(func.max(StateLog.at)).where(StateLog.lead_id == lead.lead_id))
         last_offer = self.s.scalar(select(func.max(Offer.presented_at)).where(Offer.lead_id == lead.lead_id))
@@ -250,6 +277,34 @@ class Conversation:
 
     # ------------------------------------------------------------------ outbound
 
+    def _gate_ctx(
+        self,
+        sheet: FactSheet,
+        stage: LeadState,
+        *,
+        ladder: dict[str, float] | None = None,
+        current_offer: float | None = None,
+        allowed_years: set[int] | None = None,
+        allowed_odometers: set[int] | None = None,
+    ) -> GateContext:
+        def _int(v: Any) -> int | None:
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        return GateContext(
+            stage=stage,
+            ladder=ladder,
+            current_offer=current_offer,
+            vehicle_year=_int(sheet.get("year")),
+            allowed_years=allowed_years or set(),
+            max_length=self.t.max_body_length,
+            vehicle_make=sheet.get("make"),
+            vehicle_odometer_km=_int(sheet.get("odometer_km")),
+            allowed_odometers=allowed_odometers or set(),
+        )
+
     def _send(
         self,
         lead: Lead,
@@ -262,16 +317,21 @@ class Conversation:
         ladder: dict[str, float] | None = None,
         current_offer: float | None = None,
         allowed_years: set[int] | None = None,
+        allowed_odometers: set[int] | None = None,
+        model_version: str | None = None,
+        prompt_hash: str | None = None,
+        generator: str = "template",
+        notes: dict[str, Any] | None = None,
         **vars: Any,
     ) -> Message | None:
         sheet = fact_sheet(self.s, lead.lead_id)
-        ctx = GateContext(
-            stage=stage or lead.state,
+        ctx = self._gate_ctx(
+            sheet,
+            stage or lead.state,
             ladder=ladder,
             current_offer=current_offer,
-            vehicle_year=int(sheet.get("year")) if sheet.get("year") else None,
-            allowed_years=allowed_years or set(),
-            max_length=self.t.max_body_length,
+            allowed_years=allowed_years,
+            allowed_odometers=allowed_odometers,
         )
         gate = validate(body, ctx)
         if not gate.ok:
@@ -300,10 +360,16 @@ class Conversation:
             body=body,
             sent_at=datetime.now(UTC),
             external_msg_id=receipt.external_msg_id,
-            model_version=T.TEMPLATE_VERSION,
-            prompt_hash=T.template_hash(template_id, **vars),
+            model_version=model_version or T.TEMPLATE_VERSION,
+            prompt_hash=prompt_hash or T.template_hash(template_id, **vars),
             validated=True,
-            validation_notes={"template": template_id, "asked_field": asked_field, "gate": gate.as_dict()},
+            validation_notes={
+                "template": template_id,
+                "asked_field": asked_field,
+                "gate": gate.as_dict(),
+                "generator": generator,
+                **(notes or {}),
+            },
         )
         self.s.add(msg)
         thread.last_outbound_at = msg.sent_at
@@ -341,19 +407,31 @@ class Conversation:
     def handle_inbound(self, msg: InboundMessage) -> HandleResult:
         thread = self.get_or_create_thread(msg)
         lead = self.link_thread(thread, msg)
-        inbound = Message(
-            thread_id=thread.thread_id,
-            lead_id=lead.lead_id if lead else None,
-            direction=Direction.INBOUND,
-            body=msg.body,
-            sent_at=datetime.now(UTC),
-            external_msg_id=msg.external_msg_id,
-            attachments=msg.attachments or None,
-        )
-        self.s.add(inbound)
-        thread.last_inbound_at = inbound.sent_at
-        thread.window_expires_at = inbound.sent_at + timedelta(hours=24)
-        self.s.flush()
+        # [1] persist — idempotently, so a retried job (a send that failed on the way out) or a
+        # redelivered webhook does not record the seller's message twice.
+        inbound = None
+        if msg.external_msg_id:
+            inbound = self.s.scalars(
+                select(Message).where(
+                    Message.thread_id == thread.thread_id,
+                    Message.direction == Direction.INBOUND,
+                    Message.external_msg_id == msg.external_msg_id,
+                )
+            ).first()
+        if inbound is None:
+            inbound = Message(
+                thread_id=thread.thread_id,
+                lead_id=lead.lead_id if lead else None,
+                direction=Direction.INBOUND,
+                body=msg.body,
+                sent_at=datetime.now(UTC),
+                external_msg_id=msg.external_msg_id,
+                attachments=msg.attachments or None,
+            )
+            self.s.add(inbound)
+            thread.last_inbound_at = inbound.sent_at
+            thread.window_expires_at = inbound.sent_at + timedelta(hours=24)
+            self.s.flush()
 
         if lead is None:
             return HandleResult(action="unlinked", details={"thread_id": str(thread.thread_id)})
@@ -365,14 +443,18 @@ class Conversation:
             transition(self.s, lead, LeadState.ENGAGED, "seller_replied_after_stall")
 
         self._last_inbound_text = msg.body
+        self._last_escalation = None
         sheet = fact_sheet(self.s, lead.lead_id)
         stage_before = compute_stage(lead.state, sheet, self._signals(lead, sheet))
         pending = self._pending_field(lead)
-        ex = extract(
-            msg.body,
-            msg.attachments,
-            pending_field=pending,
-            stage_priced=stage_before.stage in PRICE_VISIBLE_STATES,
+        ex = self._extract(
+            lead,
+            thread,
+            msg,
+            sheet,
+            pending,
+            stage_before.stage in PRICE_VISIBLE_STATES,
+            exclude_msg_id=inbound.msg_id,
         )
 
         # --- screens (5.2, 8) ---
@@ -465,7 +547,15 @@ class Conversation:
                 )
 
         # --- respond [4]-[7] ---
-        sent = self._respond(lead, thread, view, ex, pending, sheet, bool(recorded))
+        sent = self._respond(lead, thread, view, ex, pending, sheet, recorded)
+        if self._last_escalation:
+            return HandleResult(
+                action="escalated",
+                lead_id=lead.lead_id,
+                stage=lead.state.value,
+                escalated=self._last_escalation,
+                facts_recorded=recorded,
+            )
         self._after_stage(lead, view)
         return HandleResult(
             action="replied" if sent else "no_reply",
@@ -477,6 +567,39 @@ class Conversation:
         )
 
     # ------------------------------------------------------------------ pieces
+
+    def _extract(
+        self,
+        lead: Lead,
+        thread: Thread,
+        msg: InboundMessage,
+        sheet: FactSheet,
+        pending: str | None,
+        stage_priced: bool,
+        exclude_msg_id: uuid.UUID | None = None,
+    ) -> Extraction:
+        """Stage 2: the extraction model over the regex floor, or the regex parsers alone."""
+        if self.model is None:
+            return extract(msg.body, msg.attachments, pending_field=pending, stage_priced=stage_priced)
+        last = self._last_outbound(lead)
+        recent = list(
+            self.s.scalars(
+                select(Message)
+                .where(Message.lead_id == lead.lead_id, Message.msg_id != exclude_msg_id)
+                .order_by(Message.sent_at.desc(), Message.msg_id.desc())
+                .limit(4)
+            )
+        )[::-1]
+        ctx = ExtractionContext(
+            lead_id=lead.lead_id,
+            thread_id=thread.thread_id,
+            vehicle=T._vehicle(sheet.get),
+            pending_field=pending,
+            last_question=last.body if last else None,
+            recent_turns=as_turns(recent),
+            stage_priced=stage_priced,
+        )
+        return ModelExtractor(self.s, self.model, self.cfg).extract(msg.body, msg.attachments, ctx)
 
     def _record_extraction(
         self, lead: Lead, sheet: FactSheet, ex: Extraction, pending: str | None
@@ -534,6 +657,31 @@ class Conversation:
                 )
                 recorded.append("contradictions_acknowledged")
                 ex.parsed_pending = True
+        # Things the model noticed that are not fields (Figure 5: they ride along in the packet's flags).
+        # Neither notes nor deferrals count as progress — they must not reset the no-progression counter.
+        if ex.notes:
+            have = list(sheet.get("seller_notes") or [])
+            merged = have + [n for n in ex.notes if n not in have]
+            if merged != have:
+                record_fact(
+                    self.s,
+                    lead.lead_id,
+                    "seller_notes",
+                    merged[:20],
+                    source=FactSource.SELLER,
+                    confidence=1.0,
+                )
+        if "defer" in ex.intents and pending and spec_for(pending) and not ex.parsed_pending:
+            deferred = list(sheet.get("deferred_fields") or [])
+            if pending not in deferred:
+                record_fact(
+                    self.s,
+                    lead.lead_id,
+                    "deferred_fields",
+                    deferred + [pending],
+                    source=FactSource.SELLER,
+                    confidence=1.0,
+                )
         return recorded
 
     def _respond(
@@ -544,55 +692,93 @@ class Conversation:
         ex: Extraction,
         pending: str | None,
         sheet: FactSheet,
-        changed: bool,
+        recorded: list[str],
     ) -> Message | None:
-        preface = "Thanks. " if changed else ""
+        directive = self._plan(lead, view, ex, pending, sheet, recorded)
+        if directive is None:
+            return None
+        return self._deliver(lead, thread, directive, view, sheet)
+
+    def _plan(
+        self,
+        lead: Lead,
+        view: StageView,
+        ex: Extraction,
+        pending: str | None,
+        sheet: FactSheet,
+        recorded: list[str],
+    ) -> Directive | None:
+        """Stage 4: decide what the next message does. Deterministic; the model only words it."""
+        changed = bool(recorded)
+        agent = self.identity(lead).agent
         if view.pending_contradictions:
             fld = view.pending_contradictions[0]
             c = sheet.contradicted[fld]
             years = {int(c["claimed"]), int(c["actual"])} if fld == "year" else set()
-            return self._send(
-                lead,
-                thread,
-                T.contradiction(fld, c["claimed"], c["actual"], c["source"]),
-                "contradiction",
-                asked_field=f"contradiction:{fld}",
+            odos = {int(c["claimed"]), int(c["actual"])} if fld == "odometer_km" else set()
+            return Directive(
+                kind="contradiction",
+                template_id="contradiction",
+                body=T.contradiction(fld, c["claimed"], c["actual"], c["source"]),
                 stage=view.stage,
+                asked_field=f"contradiction:{fld}",
                 allowed_years=years,
-                field=fld,
+                allowed_odometers=odos,
+                instruction=contradiction_instruction(fld, c["claimed"], c["actual"], c["source"]),
+                template_vars={"field": fld},
             )
         if view.stage == LeadState.DISCOVERY and view.next_field is not None:
-            spec = view.next_field
-            if pending == spec.key and not ex.parsed_pending and not changed:
-                return self._send(
-                    lead,
-                    thread,
-                    T.clarify(spec),
-                    "clarify",
-                    asked_field=spec.key,
+            # Fields the seller said they'd come back on go to the end of the queue while others remain.
+            deferred_keys = [k for k in (sheet.get("deferred_fields") or []) if k in view.outstanding]
+            order = [k for k in view.outstanding if k not in deferred_keys] + deferred_keys
+            spec = spec_for(order[0]) or view.next_field
+            deferred_now = "defer" in ex.intents and pending == view.next_field.key and not ex.parsed_pending
+            deferred_label = None
+            if deferred_now:
+                dspec = spec_for(pending)
+                deferred_label = dspec.label.lower() if dspec else pending
+            if pending == spec.key and not ex.parsed_pending and not changed and not deferred_now:
+                return Directive(
+                    kind="clarify",
+                    template_id="clarify",
+                    body=T.clarify(spec),
                     stage=view.stage,
-                    field=spec.key,
+                    asked_field=spec.key,
+                    instruction=clarify_instruction(
+                        spec,
+                        low_confidence=ex.low_confidence.get(spec.key),
+                        seller_question=ex.seller_question,
+                        agent=agent,
+                    ),
+                    template_vars={"field": spec.key},
                 )
             if spec.key == "photos":
                 have = len(sheet.get("photos") or [])
                 if 0 < have < self.cfg.min_photos:
-                    return self._send(
-                        lead,
-                        thread,
-                        T.photos_partial(have, self.cfg.min_photos),
-                        "photos_partial",
-                        asked_field="photos",
+                    return Directive(
+                        kind="photos_partial",
+                        template_id="photos_partial",
+                        body=T.photos_partial(have, self.cfg.min_photos),
                         stage=view.stage,
-                        have=have,
+                        asked_field="photos",
+                        instruction=photos_partial_instruction(have, self.cfg.min_photos),
+                        template_vars={"have": have},
                     )
-            return self._send(
-                lead,
-                thread,
-                T.ask_field(spec, preface=preface),
-                f"ask:{spec.key}",
-                asked_field=spec.key,
+            return Directive(
+                kind="ask_field",
+                template_id=f"ask:{spec.key}",
+                body=T.ask_field(spec, preface="Thanks. " if changed else ""),
                 stage=view.stage,
-                field=spec.key,
+                asked_field=spec.key,
+                instruction=ask_field_instruction(
+                    spec,
+                    recorded=[k for k in recorded if k not in BOOKKEEPING_FIELDS],
+                    seller_question=ex.seller_question,
+                    deferred=deferred_label,
+                    only_remaining=bool(deferred_now and spec.key == pending),
+                    agent=agent,
+                ),
+                template_vars={"field": spec.key},
             )
         if view.stage == LeadState.VERIFICATION:
             last = self._last_outbound(lead)
@@ -602,12 +788,60 @@ class Conversation:
                 and last.validation_notes.get("template") == "verification_wait"
             ):
                 return None
-            return self._send(
-                lead, thread, T.verification_wait(self.identity(lead)), "verification_wait", stage=view.stage
+            return Directive(
+                kind="verification_wait",
+                template_id="verification_wait",
+                body=T.verification_wait(self.identity(lead)),
+                stage=view.stage,
+                instruction=verification_wait_instruction(),
             )
         if view.stage == LeadState.PRICED:
             return None  # on_priced handles presentation (human or automated)
         return None
+
+    def _deliver(
+        self, lead: Lead, thread: Thread, directive: Directive, view: StageView, sheet: FactSheet
+    ) -> Message | None:
+        """Stages 5–7: word it (model or script), gate it, send it, log it."""
+        gate_ctx = self._gate_ctx(
+            sheet,
+            directive.stage,
+            allowed_years=directive.allowed_years,
+            allowed_odometers=directive.allowed_odometers,
+        )
+        result = Composer(self.s, self.model, self.cfg).compose(
+            lead,
+            thread,
+            directive,
+            sheet=sheet,
+            outstanding=view.outstanding,
+            identity=self.identity(lead),
+            seller_first_name=(lead.upstream_payload.get("seller", {}).get("display_name") or "").split(" ")[
+                0
+            ],
+            channel=thread.channel.value,
+            gate_ctx=gate_ctx,
+        )
+        if result.escalate_reason:
+            reason = f"model_flagged:{result.escalate_reason}"
+            escalate(self.s, lead, reason, {"directive": directive.kind, **result.notes})
+            self._last_escalation = reason
+            return None
+        return self._send(
+            lead,
+            thread,
+            result.body,
+            directive.template_id,
+            asked_field=directive.asked_field,
+            stage=directive.stage,
+            allowed_years=directive.allowed_years,
+            allowed_odometers=directive.allowed_odometers,
+            model_version=result.model_version,
+            prompt_hash=result.notes.get("prompt_hash"),
+            generator=result.generator,
+            notes={k: v for k, v in result.notes.items() if k != "prompt_hash"},
+            **directive.template_vars,
+        )
 
     def _after_stage(self, lead: Lead, view: StageView) -> None:
         if view.stage == LeadState.VERIFICATION and not view.verification_outstanding:
@@ -750,9 +984,13 @@ class Conversation:
             return None
         val = self.s.get(Valuation, offer.valuation_id)
         ladder = val.ladder if val else None
-        if "accept" in ex.intents or (
-            ex.counter_price is not None and ex.counter_price <= float(offer.amount)
-        ):
+        amount = float(offer.amount)
+        # A figure at or below ours only reads as acceptance when nothing in the message pushes back:
+        # "$5,600 is too low" quotes our own number and is a counter, not a yes.
+        pushback = "reject" in ex.intents or bool(REJECT.search(msg.body) or PUSHBACK.search(msg.body))
+        quotes_ours = ex.counter_price is not None and abs(ex.counter_price - amount) < 1
+        accepts_by_figure = ex.counter_price is not None and ex.counter_price <= amount and not pushback
+        if ("accept" in ex.intents and not pushback) or accepts_by_figure:
             offer.outcome, offer.outcome_at = OfferOutcome.ACCEPTED, datetime.now(UTC)
             transition(self.s, lead, LeadState.ACCEPTED, "seller_accepted", {"amount": float(offer.amount)})
             sent = self._send(
@@ -809,13 +1047,14 @@ class Conversation:
             )
 
         if "counter" in ex.intents or "reject" in ex.intents:
-            transition(self.s, lead, LeadState.NEGOTIATING, "seller_countered", {"counter": ex.counter_price})
+            counter = None if quotes_ours else ex.counter_price
+            transition(self.s, lead, LeadState.NEGOTIATING, "seller_countered", {"counter": counter})
             if not self.cfg.auto_present_offer:
                 escalate(
                     self.s,
                     lead,
                     "offer_response_needed",
-                    {"counter": ex.counter_price, "current": float(offer.amount), "message": msg.body[:300]},
+                    {"counter": counter, "current": amount, "message": msg.body[:300]},
                 )
                 return HandleResult(
                     action="escalated",
@@ -851,7 +1090,7 @@ class Conversation:
                 lead,
                 "above_authorised_ladder",
                 {
-                    "counter": ex.counter_price,
+                    "counter": counter,
                     "last_step": offer.ladder_step.value,
                     "amount": float(offer.amount),
                 },
@@ -967,6 +1206,14 @@ def _conversation_for(session: Session, lead: Lead) -> tuple[Conversation, Threa
 
 def register_handlers() -> None:
     from acqbot.queue.worker import job_handler
+
+    @job_handler("inbound_message")
+    def _inbound_message(session: Session, payload: dict[str, Any]) -> None:
+        """Webhooks enqueue; the worker runs the loop. Keeps the model's latency off the webhook."""
+        from acqbot.transport.registry import get_transport
+
+        msg = InboundMessage.from_payload(payload)
+        Conversation(session, get_transport(msg.channel)).handle_inbound(msg)
 
     @job_handler("maybe_send_opening")
     def _maybe_send_opening(session: Session, payload: dict[str, Any]) -> None:

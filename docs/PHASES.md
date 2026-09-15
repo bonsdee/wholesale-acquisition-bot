@@ -38,9 +38,19 @@ Not in Phase 1: any outbound contact.
 
 Mode: `ACQBOT_AUTO_PRESENT_OFFER=false` (default) — a person presents every offer and every counter routes to a person. `true` — Phase 5 behaviour: automation presents the opening and traverses the two authorised concessions.
 
-## Phase 4 — Language model for discovery only
+## Phase 4 — Language model for discovery only ✅
 
-Replace `extract.py` with the extraction model (Haiku, JSON, temperature 0) and `templates.py` with the generation model behind the same `Extraction` / `_respond` seams; prompt architecture [7.2]; rolling summary + last 15 turns; Langfuse tracing. The gate, state machine, transports and escalations do not change.
+- Model client (`llm/client.py`): Claude API, structured JSON output via `output_config`, error mapping; `fake` provider for tests and demos; provider chosen by `ACQBOT_LLM_PROVIDER` / the API key
+- Extraction [7 stage 2] (`conversation/extract_model.py`, `llm/schemas.py`): Haiku reads every inbound in context, returns facts in a fixed wire format; code coerces into the fact vocabulary, applies a confidence threshold, keeps the regex screens as a floor; seller questions, deferrals and notes captured
+- Prompt architecture [7.2] (`llm/prompts.py`): system (identity, disclosure stance, hard constraints, tone, process notes) + per-turn context (stage, outstanding fields, fact sheet, `Valuation: NOT RELEASED`, instruction) + history; `prompt:v1`
+- Planner → composer [7 stages 4–6] (`conversation/compose.py`): code decides the directive, Sonnet words it, gate checks it, one rewrite with the violations, then the scripted wording; model escalation flags honoured; `proposed_state` logged only
+- Gate additions: odometer and make must match the fact sheet
+- Memory [7.3] (`conversation/history.py`): last 15 turns verbatim, rolling summary on the thread
+- Trace capture [11] (`model_calls`, migration 0003): every call stored whole and immutable; `acqbot model-check`, `model-calls`, `prompt`
+- Scope: discovery messages only; opening, disclosure, bot-question answer, offers and closes stay scripted; every offer still presented by a person
+- 43 new tests (unit, end-to-end through the fake client, SDK client with a mocked transport), two of them live against the API when a key is present
+
+Not in Phase 4: reading photos (odometer confirmation is still a human task), offer wording (Phase 5), prompt caching, Langfuse.
 
 ## Phase 5 — Automated offer presentation
 

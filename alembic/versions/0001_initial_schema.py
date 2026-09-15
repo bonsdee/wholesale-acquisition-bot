@@ -21,9 +21,22 @@ depends_on = None
 
 ENUMS: dict[str, list[str]] = {
     "lead_state": [
-        "NEW", "CONTACTED", "ENGAGED", "DISCOVERY", "VERIFICATION", "PRICED", "OFFER_MADE",
-        "NEGOTIATING", "ACCEPTED", "HANDOFF", "REJECTED", "STALLED", "ARCHIVED", "ESCALATED",
-        "HUMAN", "TERMINATED",
+        "NEW",
+        "CONTACTED",
+        "ENGAGED",
+        "DISCOVERY",
+        "VERIFICATION",
+        "PRICED",
+        "OFFER_MADE",
+        "NEGOTIATING",
+        "ACCEPTED",
+        "HANDOFF",
+        "REJECTED",
+        "STALLED",
+        "ARCHIVED",
+        "ESCALATED",
+        "HUMAN",
+        "TERMINATED",
     ],
     "channel": ["console", "messenger", "sms"],
     "direction": ["inbound", "outbound"],
@@ -167,7 +180,9 @@ def upgrade() -> None:
     op.create_table(
         "lead_duplicates",
         _uuid_pk("id"),
-        sa.Column("duplicate_of", postgresql.UUID(as_uuid=True), sa.ForeignKey("leads.lead_id"), nullable=False),
+        sa.Column(
+            "duplicate_of", postgresql.UUID(as_uuid=True), sa.ForeignKey("leads.lead_id"), nullable=False
+        ),
         _ts("received_at"),
         sa.Column("upstream_payload", postgresql.JSONB(), nullable=False),
     )
@@ -189,7 +204,9 @@ def upgrade() -> None:
     op.create_table(
         "messages",
         _uuid_pk("msg_id"),
-        sa.Column("thread_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("threads.thread_id"), nullable=False),
+        sa.Column(
+            "thread_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("threads.thread_id"), nullable=False
+        ),
         sa.Column("lead_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("leads.lead_id")),
         sa.Column("direction", _e("direction"), nullable=False),
         sa.Column("body", sa.Text(), nullable=False),
@@ -250,7 +267,10 @@ def upgrade() -> None:
         _uuid_pk("offer_id"),
         sa.Column("lead_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("leads.lead_id"), nullable=False),
         sa.Column(
-            "valuation_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("valuations.valuation_id"), nullable=False
+            "valuation_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("valuations.valuation_id"),
+            nullable=False,
         ),
         sa.Column("amount", sa.Numeric(12, 2), nullable=False),
         sa.Column("ladder_step", _e("ladder_step"), nullable=False),

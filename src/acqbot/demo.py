@@ -1,4 +1,4 @@
-"""Scripted seller demo — runs a whole conversation through the Console transport with no model.
+"""Scripted seller demo — runs a whole conversation through the Console transport.
 
 This is Phase 3's proof: ingestion → enrichment → opening → discovery → verification → valuation →
 offer → negotiation → acceptance → handoff, with every message passing the validation gate and
@@ -49,6 +49,8 @@ SELLER_SCRIPTS: dict[str, list[str]] = {
     "bot_question": ["Wait, am I talking to a bot?"],
     "legal": ["My lawyer says I should take you to consumer affairs"],
     "silent_pushback": ["hmm", "not sure", "let me think"],
+    # Quotes our own figure back while pushing back — must read as a counter, never as a yes.
+    "quote_back": ["${offer:,} is too low honestly, I was after more", "Ok deal"],
 }
 
 
@@ -166,23 +168,34 @@ def run_demo(
     echo: bool = False,
     human_presents: bool | None = None,
     max_turns: int = 30,
+    model: str | None = None,
 ) -> DemoRun:
+    """Run one scripted seller end to end.
+
+    `model` picks the language-model provider for this run: "off" (scripted templates), "fake"
+    (the deterministic no-network client — exercises the whole Phase 4 path) or "anthropic".
+    None keeps whatever the environment says.
+    """
     import os
 
     from acqbot.config import reset_settings_cache
 
     console = reset_console_transport(echo=echo)
     auto = get_settings().auto_present_offer if human_presents is None else not human_presents
-    previous = os.environ.get("ACQBOT_AUTO_PRESENT_OFFER")
-    os.environ["ACQBOT_AUTO_PRESENT_OFFER"] = "true" if auto else "false"
+    overrides = {"ACQBOT_AUTO_PRESENT_OFFER": "true" if auto else "false"}
+    if model is not None:
+        overrides["ACQBOT_LLM_PROVIDER"] = model
+    previous = {k: os.environ.get(k) for k in overrides}
+    os.environ.update(overrides)
     reset_settings_cache()
     try:
         return _run(console, scenario, seller_script, seed=seed, auto=auto, max_turns=max_turns)
     finally:
-        if previous is None:
-            os.environ.pop("ACQBOT_AUTO_PRESENT_OFFER", None)
-        else:
-            os.environ["ACQBOT_AUTO_PRESENT_OFFER"] = previous
+        for k, v in previous.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         reset_settings_cache()
 
 
@@ -228,7 +241,12 @@ def _run(
         if state in {"OFFER_MADE", "NEGOTIATING"}:
             if not script:
                 break
-            r = say(script.pop(0))
+            line = script.pop(0)
+            if "{offer" in line:
+                with session_scope() as s:
+                    current = Conversation(s, console).current_offer(s.get(Lead, lead_id))
+                    line = line.format(offer=int(current.amount) if current else 0)
+            r = say(line)
         elif state == "PRICED":
             if auto:
                 break  # nothing to say; automation should already have presented
@@ -270,6 +288,8 @@ def _run(
                 "body": m.body,
                 "attachments": m.attachments,
                 "template": (m.validation_notes or {}).get("template"),
+                "generator": (m.validation_notes or {}).get("generator"),
+                "model_version": m.model_version,
             }
             for m in msgs
         ]

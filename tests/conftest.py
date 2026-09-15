@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 TEST_DB_URL = os.environ.get(
-    "ACQBOT_TEST_DATABASE_URL", "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/acqbot_test"
+    "ACQBOT_TEST_DATABASE_URL", "postgresql+pg8000://postgres:postgres@127.0.0.1:5432/acqbot_test"
 )
 # The suite drops and recreates the public schema. Refuse anything that does not look like a test database.
 _dbname = TEST_DB_URL.rsplit("/", 1)[-1].split("?", 1)[0]
@@ -36,6 +36,7 @@ import acqbot.queue.handlers  # noqa: E402,F401  (register job handlers)
 from acqbot.config import reset_settings_cache  # noqa: E402
 from acqbot.db import get_engine, get_sessionmaker, reset_engine_cache  # noqa: E402
 from acqbot.enrichment.providers import reset_providers_cache  # noqa: E402
+from acqbot.llm.registry import set_model_client  # noqa: E402
 from acqbot.models import Base  # noqa: E402
 
 
@@ -62,6 +63,7 @@ def _clean_tables() -> Iterator[None]:
         conn.execute(text(f"TRUNCATE {tables} CASCADE"))
     reset_settings_cache()
     reset_providers_cache()
+    set_model_client(None)
 
 
 @pytest.fixture

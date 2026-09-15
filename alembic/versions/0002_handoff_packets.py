@@ -63,4 +63,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise RuntimeError("Downgrade is intentionally unsupported: conversation data is never destroyed by a migration.")
+    raise RuntimeError(
+        "Downgrade is intentionally unsupported: conversation data is never destroyed by a migration."
+    )

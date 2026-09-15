@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, InternalError
+from sqlalchemy.exc import DBAPIError
 
 from acqbot.conversation.transitions import escalate
 from acqbot.facts.store import record_fact
@@ -25,7 +25,11 @@ from acqbot.models import (
 )
 from acqbot.simulator import make_lead
 
-APPEND_ONLY = (IntegrityError, InternalError)
+# The triggers raise SQLSTATE 23000 with an "append-only" / "write-once" message. Drivers map that
+# code to different DBAPI classes (psycopg: IntegrityError, pg8000: ProgrammingError), so match on
+# the message rather than the class.
+APPEND_ONLY = DBAPIError
+APPEND_ONLY_MATCH = r"append-only|write-once"
 
 
 def _lead(session, seed=40):
@@ -47,20 +51,20 @@ def _thread_and_message(session, lead):
 def test_messages_cannot_be_updated_or_deleted(session):
     lead = _lead(session)
     _, m = _thread_and_message(session, lead)
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(text("UPDATE messages SET body = 'edited' WHERE msg_id = :id"), {"id": m.msg_id})
     session.rollback()
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(text("DELETE FROM messages WHERE msg_id = :id"), {"id": m.msg_id})
     session.rollback()
 
 
 def test_state_log_is_immutable(session):
     lead = _lead(session, seed=41)
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(text("DELETE FROM state_log WHERE lead_id = :id"), {"id": lead.lead_id})
     session.rollback()
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(text("UPDATE state_log SET trigger = 'x' WHERE lead_id = :id"), {"id": lead.lead_id})
     session.rollback()
 
@@ -72,18 +76,18 @@ def test_vehicle_facts_superseded_by_is_write_once(session):
     session.commit()
     assert a.superseded_by == b.fact_id
 
-    with pytest.raises(APPEND_ONLY):  # cannot re-point
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):  # cannot re-point
         session.execute(
             text("UPDATE vehicle_facts SET superseded_by = :b WHERE fact_id = :a"),
             {"a": a.fact_id, "b": a.fact_id},
         )
     session.rollback()
-    with pytest.raises(APPEND_ONLY):  # cannot change the value
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):  # cannot change the value
         session.execute(
             text("UPDATE vehicle_facts SET value = '3'::jsonb WHERE fact_id = :b"), {"b": b.fact_id}
         )
     session.rollback()
-    with pytest.raises(APPEND_ONLY):  # cannot delete
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):  # cannot delete
         session.execute(text("DELETE FROM vehicle_facts WHERE fact_id = :b"), {"b": b.fact_id})
     session.rollback()
 
@@ -119,12 +123,12 @@ def test_offer_outcome_is_write_once(session):
     o.outcome_at = datetime.now(UTC)
     session.commit()  # first resolution is fine
 
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(
             text("UPDATE offers SET outcome = 'accepted' WHERE offer_id = :id"), {"id": o.offer_id}
         )
     session.rollback()
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(
             text("UPDATE valuations SET wholesale_max = 99999 WHERE valuation_id = :id"),
             {"id": v.valuation_id},
@@ -140,15 +144,43 @@ def test_escalation_resolution_is_write_once(session):
     esc.resolution = "handled"
     esc.resolved_at = datetime.now(UTC)
     session.commit()
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(
             text("UPDATE escalations SET resolution = 'changed' WHERE escalation_id = :id"),
             {"id": esc.escalation_id},
         )
     session.rollback()
-    with pytest.raises(APPEND_ONLY):
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
         session.execute(
             text("UPDATE escalations SET reason = 'other' WHERE escalation_id = :id"),
             {"id": esc.escalation_id},
         )
+    session.rollback()
+
+
+def test_model_calls_are_immutable(session):
+    from acqbot.llm.client import ModelRequest, ModelResponse
+    from acqbot.llm.trace import record_call
+
+    lead = _lead(session, seed=44)
+    req = ModelRequest(
+        purpose="extract", model="fake", system="s", messages=[{"role": "user", "content": "x"}]
+    )
+    resp = ModelResponse(
+        text="{}",
+        parsed={},
+        model="fake",
+        stop_reason="end_turn",
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1,
+    )
+    row = record_call(session, req, resp, prompt_version="prompt:test", lead_id=lead.lead_id, thread_id=None)
+    session.commit()
+    assert row.prompt_hash == req.prompt_hash("prompt:test") and len(row.prompt_hash) == 64
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
+        session.execute(text("UPDATE model_calls SET error = 'x' WHERE call_id = :id"), {"id": row.call_id})
+    session.rollback()
+    with pytest.raises(APPEND_ONLY, match=APPEND_ONLY_MATCH):
+        session.execute(text("DELETE FROM model_calls WHERE call_id = :id"), {"id": row.call_id})
     session.rollback()
