@@ -191,9 +191,19 @@ def write_packet(
 
 
 def transcript(session: Session, lead_id: uuid.UUID) -> list[dict[str, Any]]:
-    msgs = session.scalars(
-        select(Message).where(Message.lead_id == lead_id).order_by(Message.sent_at, Message.msg_id)
+    from acqbot.models import Thread
+
+    msgs = list(
+        session.scalars(
+            select(Message).where(Message.lead_id == lead_id).order_by(Message.sent_at, Message.msg_id)
+        )
     )
+    # A conversation can change channel partway through (4.2 Stage 3), and a closer reading the
+    # transcript needs to see where — "we said this on Messenger, that on SMS" is the difference
+    # between one conversation and two.
+    channels = {
+        t.thread_id: t.channel.value for t in session.scalars(select(Thread).where(Thread.lead_id == lead_id))
+    }
     return [
         {
             "at": m.sent_at.isoformat(),
@@ -202,6 +212,7 @@ def transcript(session: Session, lead_id: uuid.UUID) -> list[dict[str, Any]]:
             "attachments": m.attachments,
             "model_version": m.model_version,
             "validated": m.validated,
+            "channel": channels.get(m.thread_id),
         }
         for m in msgs
     ]

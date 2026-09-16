@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -323,12 +324,107 @@ def queue() -> None:
         typer.echo("queue empty")
 
 
+@app.command()
+def review(
+    model: Annotated[
+        str | None,
+        typer.Option(help="anthropic (the real thing) | fake (no network) | off. Default: environment."),
+    ] = None,
+    persona: Annotated[
+        list[str] | None, typer.Option(help="Run only these personas. Repeatable. Default: all of them.")
+    ] = None,
+    scenario: str = "clean",
+    seed: int = 42,
+    auto_offer: Annotated[
+        bool, typer.Option(help="Let the automation traverse the ladder so negotiation is reviewed too.")
+    ] = True,
+    out: Annotated[str, typer.Option(help="Where to write the markdown report.")] = "review.md",
+) -> None:
+    """Run the awkward sellers past the model and write a report on how it handled them.
+
+    This is the prompt-tuning loop: read the report, change the wording in llm/prompts.py, run it
+    again. Against the real API a full run is roughly 90 calls and a few cents.
+    """
+    import acqbot.queue.handlers  # noqa: F401
+    from acqbot.config import get_settings, reset_settings_cache
+    from acqbot.llm.registry import missing_key_reason
+    from acqbot.personas import ALL, BY_NAME
+    from acqbot.review import render_markdown, run_review
+
+    if model is not None:
+        os.environ["ACQBOT_LLM_PROVIDER"] = model
+    reset_settings_cache()
+    cfg = get_settings()
+    reason = missing_key_reason(cfg)
+    if reason:
+        typer.echo(reason)
+        raise typer.Exit(code=1)
+
+    chosen = list(ALL)
+    if persona:
+        unknown = [p for p in persona if p not in BY_NAME]
+        if unknown:
+            typer.echo(f"unknown persona(s): {', '.join(unknown)}. Known: {', '.join(BY_NAME)}")
+            raise typer.Exit(code=1)
+        chosen = [BY_NAME[p] for p in persona]
+
+    label = (
+        f"{cfg.extraction_model} + {cfg.conversation_model}"
+        if cfg.resolved_llm_provider == "anthropic"
+        else cfg.resolved_llm_provider
+    )
+    real = cfg.resolved_llm_provider == "anthropic"
+    if real:
+        # One tiny call per model before committing to twenty minutes of conversation. A dead key
+        # or an empty balance produces a report that says nothing except "fell back to the script".
+        from acqbot.llm.registry import get_model_client, probe
+
+        client = get_model_client(cfg)
+        for model in (cfg.extraction_model, cfg.conversation_model):
+            ok, detail = probe(client, model, effort=cfg.llm_effort)
+            if not ok:
+                typer.echo(f"{model}: {detail}")
+                typer.echo("nothing was run — fix that and try again, or use --model fake for a dry run.")
+                raise typer.Exit(code=1)
+        typer.echo("both models answered.")
+    typer.echo(f"running {len(chosen)} seller(s) against {label}...")
+
+    def report_one(c) -> None:
+        mark = "ok  " if c.ok else ("--  " if c.needs_model and not real else "SEE ")
+        bits = []
+        if c.problems:
+            bits.append(f"{len(c.problems)} problem(s)")
+        if c.rejections:
+            bits.append(f"{len(c.rejections)} gate rejection(s)")
+        if c.fallbacks:
+            bits.append(f"{len(c.fallbacks)} fallback(s)")
+        if c.needs_model and not real:
+            bits.append("needs a real model")
+        typer.echo(f"  {mark} {c.persona:14s} {c.final_state:11s} {'; '.join(bits)}")
+
+    result = run_review(
+        chosen,
+        scenario=scenario,
+        seed=seed,
+        model_label=label,
+        auto_offer=auto_offer,
+        on_persona=report_one,
+    )
+    Path(out).write_text(render_markdown(result), encoding="utf-8")
+    if result.aborted:
+        typer.echo(f"\n{result.aborted}")
+    clean = sum(1 for c in result.conversations if c.ok)
+    typer.echo(
+        f"\n{clean}/{len(result.conversations)} clean · {result.calls} calls · "
+        f"US${result.cost_aud:.2f}\n\n  → {out}"
+    )
+
+
 @app.command("model-check")
 def model_check() -> None:
     """Verify the language-model configuration with one tiny call to each configured model."""
     from acqbot.config import get_settings
-    from acqbot.llm.client import ModelError, ModelRequest
-    from acqbot.llm.registry import get_model_client, missing_key_reason
+    from acqbot.llm.registry import get_model_client, missing_key_reason, probe
 
     cfg = get_settings()
     typer.echo(f"provider: {cfg.resolved_llm_provider} (ACQBOT_LLM_PROVIDER={cfg.llm_provider})")
@@ -345,31 +441,13 @@ def model_check() -> None:
     if client.name == "fake":
         typer.echo("fake client: deterministic, no network — nothing to verify")
         return
-    schema = {
-        "type": "object",
-        "properties": {"ok": {"type": "boolean"}},
-        "required": ["ok"],
-        "additionalProperties": False,
-    }
+    failed = False
     for purpose, model in (("extract", cfg.extraction_model), ("generate", cfg.conversation_model)):
-        req = ModelRequest(
-            purpose=purpose,
-            model=model,
-            system="Reply with JSON matching the schema.",
-            messages=[{"role": "user", "content": "Set ok to true."}],
-            schema=schema,
-            max_tokens=64,
-            effort=cfg.llm_effort,
-        )
-        try:
-            resp = client.complete(req)
-        except ModelError as exc:
-            typer.echo(f"{purpose:9s} {model}: FAILED — {exc}")
-            raise typer.Exit(code=1) from exc
-        typer.echo(
-            f"{purpose:9s} {resp.model}: ok={resp.parsed and resp.parsed.get('ok')} "
-            f"{resp.latency_ms} ms, {resp.input_tokens} in / {resp.output_tokens} out"
-        )
+        ok, detail = probe(client, model, effort=cfg.llm_effort)
+        typer.echo(f"{purpose:9s} {model}: {'ok' if ok else 'FAILED'} — {detail}")
+        failed |= not ok
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @app.command("model-calls")

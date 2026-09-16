@@ -62,3 +62,52 @@ def get_model_client(settings: Settings | None = None) -> ModelClient | None:
         )
     _cached = (key, client)
     return client
+
+
+# The smallest possible call: does this key work, does this model answer, is there money on the
+# account. `model-check` runs it on demand; `review` runs it before spending twenty minutes.
+PROBE_SCHEMA = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
+
+
+def probe(client: ModelClient, model: str, *, effort: str | None = None) -> tuple[bool, str]:
+    """(ok, detail). `detail` is a one-line reason on failure, or timing on success."""
+    from acqbot.llm.client import ModelError, ModelRequest
+
+    req = ModelRequest(
+        purpose="extract",
+        model=model,
+        system="Reply with JSON matching the schema.",
+        messages=[{"role": "user", "content": "Set ok to true."}],
+        schema=PROBE_SCHEMA,
+        max_tokens=64,
+        effort=effort,
+    )
+    try:
+        resp = client.complete(req)
+    except ModelError as exc:
+        return False, _humanise(str(exc))
+    if resp.parsed is None:
+        return False, f"answered but not in the requested shape (stop_reason={resp.stop_reason})"
+    return True, f"{resp.latency_ms} ms, {resp.input_tokens} in / {resp.output_tokens} out"
+
+
+def _humanise(error: str) -> str:
+    """Turn the API's error into the sentence that says what to do about it."""
+    low = error.lower()
+    if "credit balance is too low" in low:
+        return (
+            "the API account has no credits — add some under Plans & Billing at "
+            "https://platform.claude.com (the key itself is fine)"
+        )
+    if "authentication" in low or "invalid x-api-key" in low or "401" in low:
+        return "the API key was rejected — check ACQBOT_ANTHROPIC_API_KEY in .env"
+    if "not_found" in low or "model" in low and "404" in low:
+        return "that model name was not recognised — check ACQBOT_EXTRACTION_MODEL / _CONVERSATION_MODEL"
+    if "rate" in low and "limit" in low:
+        return "rate limited — wait a moment and try again"
+    return error

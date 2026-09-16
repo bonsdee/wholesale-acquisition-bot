@@ -27,9 +27,21 @@ DISTRESS = re.compile(
     r"about to lose|repossess|repo man|no other option)\b",
     re.I,
 )
+# Whose car is it. The commonest real phrasing is not "I am not the owner" — it is "it's my mum's
+# car", which this missed until the review harness ran a seller who said exactly that.
+_RELATIVE = (
+    r"mum|mom|mother|dad|father|nan|nana|nanna|grandma|grandmother|grandad|grandpa|grandfather|"
+    r"partner|husband|wife|brother|sister|son|daughter|uncle|aunt|aunty|cousin|mate|friend|"
+    r"neighbour|neighbor|boss|landlord"
+)
 MINOR_OR_NO_AUTHORITY = re.compile(
     r"\b(under 18|i'?m 1[0-7]\b|i am 1[0-7]\b|not my car|isn'?t my car|not the owner|not in my name|"
-    r"in my (mum|mom|dad|father|mother|partner|husband|wife|brother|sister)'?s name|selling (it )?for (my|a) (mate|friend|mum|dad|brother|sister|uncle|aunt|cousin))\b",
+    rf"in my ({_RELATIVE})'?s name|"
+    rf"my ({_RELATIVE})'?s (car|vehicle|ute|van|suv|wagon)|"
+    rf"(car|vehicle|ute|van) (is|belongs to) my ({_RELATIVE})|"
+    rf"selling (it |the car )?(for|on behalf of) (my|a|an) ({_RELATIVE})|"
+    r"on behalf of the owner|power of attorney|"
+    rf"handling the sale for (my|her|his|their|them|a|an)( ({_RELATIVE}))?)\b",
     re.I,
 )
 HUMAN_QUESTION = re.compile(
@@ -46,13 +58,22 @@ STOP = re.compile(r"^\s*(stop|unsubscribe|opt out|no more messages|don'?t contac
 
 # --- intents ---------------------------------------------------------------------------------
 
+# Acceptance is anchored at the start so "no deal" cannot match, but a real seller puts a word in
+# front of it — "Alright, done" — so an optional filler is allowed before the word that decides.
+_ACCEPT_FILLER = (
+    r"(?:(?:alright|all right|righto?|right|well|great|perfect|awesome|cool|sweet|lovely|nice|"
+    r"ok(?:ay)?|yeah|yep|sure|fine|go on then|happy with that)[,!.\s]+)*"
+)
 ACCEPT = re.compile(
-    r"^\s*(yes|yep|yeah|yup|ok(ay)?|deal|done|accept(ed)?|i'?ll take it|let'?s do it|sounds good|that works|agreed|sold)\b",
+    rf"^\s*{_ACCEPT_FILLER}"
+    r"(yes|yep|yeah|yup|ok(ay)?|deal|done|accept(ed)?|i'?ll take it|let'?s do it|sounds good|"
+    r"that works|that'?ll do|agreed|sold|happy with that|works for me)\b",
     re.I,
 )
 REJECT = re.compile(
+    # "yeah nah" is a no. Without it the leading "yeah" reads as an acceptance.
     r"\b(no thanks|not interested|i'?ll pass|pass on|too low|way too low|not enough|no way|forget it|"
-    r"insulting|lowball|not selling for that|keep it)\b",
+    r"insulting|lowball|not selling for that|keep it|yeah,? nah|nah,? (mate|sorry|i'?m right))\b",
     re.I,
 )
 PUSHBACK = re.compile(

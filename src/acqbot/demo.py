@@ -40,6 +40,7 @@ ANSWERS: dict[str, str] = {
     "tyre_condition": "Tyres are good, plenty of tread",
     "keys_count": "Two keys",
     "rego_status": "Yes it's current, registered until March next year",
+    "seller_phone": "0412 345 678",
 }
 
 SELLER_SCRIPTS: dict[str, list[str]] = {
@@ -51,6 +52,14 @@ SELLER_SCRIPTS: dict[str, list[str]] = {
     "silent_pushback": ["hmm", "not sure", "let me think"],
     # Quotes our own figure back while pushing back — must read as a counter, never as a yes.
     "quote_back": ["${offer:,} is too low honestly, I was after more", "Ok deal"],
+    # Counters past the two authorised concessions: the only script that runs the automated ladder
+    # out and forces the Phase 5 question of what happens at the ceiling.
+    "haggle_to_ceiling": [
+        "Too low, I was hoping for more",
+        "Can you do better than that?",
+        "Still not enough, come on",
+        "What's your actual best?",
+    ],
 }
 
 

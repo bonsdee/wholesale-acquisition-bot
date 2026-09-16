@@ -48,6 +48,12 @@ class Settings(BaseSettings):
 
     # Behaviour flags
     auto_present_offer: bool = False
+    # Phase 6 — channel migration and nudges. The cadence is an open client decision (A.2 "stall
+    # recovery cadence"), so these are defaults to be argued with, not findings.
+    sms_migration: bool = True
+    nudge_before_window_closes_hours: int = 20  # inside Messenger's 24h, while we may still send
+    sms_nudge_hours: tuple[int, ...] = (24, 72)  # after the first, spaced for SMS courtesy norms
+    max_nudges: int = 3
     min_photos: int = 6
     human_sla_hours: int = 4  # escalation and handoff SLA (A.1 — placeholder until agreed)
     no_progress_turns: int = 3  # consecutive seller turns without progression → escalate (5.2)

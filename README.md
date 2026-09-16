@@ -5,7 +5,7 @@ private-seller leads, conducts a structured discovery conversation, produces a b
 presents a firm offer within pre-authorised limits, and hands a complete deal packet to a human
 closer.
 
-**Status** Phases 1–4 of 6 complete · 187 tests · Not production ready — see
+**Status** All six phases complete · 234 tests · Not production ready — see
 [Before going live](#before-going-live)
 **Stack** Python 3.11+ · FastAPI · PostgreSQL · SQLAlchemy 2 · Alembic · Claude API
 **Jurisdiction** Victoria, Australia — LMCT-regulated activity
@@ -72,7 +72,9 @@ every inbound message. A lead cannot reach an offer before the facts required to
 
 **No figure can be expressed that is not authorised.** The validation gate rejects any outbound
 message containing a dollar amount before the `PRICED` stage, or any amount that is not one of the
-four ladder values. This is code at the send boundary, not an instruction in a prompt.
+four ladder values. When code is presenting a specific offer it narrows that further, to the one
+amount being presented — being *on* the ladder is not enough — and pins the amount and the expiry
+word for word. This is code at the send boundary, not an instruction in a prompt.
 
 **Conversation evidence is immutable.** Messages, state transitions, valuations and market data
 cannot be updated or deleted — enforced by database triggers, so the guarantee survives direct
@@ -96,11 +98,16 @@ instead. The model can neither block a conversation nor send an unchecked senten
 
 What the model holds is deliberately narrow. Its context carries the stage, the outstanding
 fields, the fact sheet split into verified / claimed / contradicted, the last fifteen turns
-verbatim with older turns folded into a rolling summary, and the instruction for this turn. It
-never carries the valuation or the ladder — there is no code path that puts them there — so a
-figure it does not hold cannot be leaked. In this phase it writes discovery messages only; the
-opening, the disclosure, the "are you a bot?" answer, every offer and every closing line remain
-scripted.
+verbatim with older turns folded into a rolling summary, and the instruction for this turn.
+
+Before `PRICED` it carries no figure at all — there is no code path that puts one there, so a
+number it does not hold cannot be leaked. From `PRICED` it is handed exactly one: the amount code
+has decided to present. Never the four ladder steps, never the ceiling, never the band, never what
+the engine thinks the car is worth. A writer that knows the ceiling is a writer that can hint at
+it, and a test asserts that at most one figure ever reaches a generation call.
+
+So the model words discovery messages and offers. The opening, the disclosure, the "are you a bot?"
+answer, the lapse notice and the closing lines stay scripted.
 
 Every call is stored whole in `model_calls` — system prompt, messages, schema, response, tokens,
 latency, error — under an immutable trigger, and every generated message records the model,
@@ -118,6 +125,36 @@ uv run acqbot prompt <msg_id>                      # the exact prompt behind an 
 ```
 
 Without `ACQBOT_ANTHROPIC_API_KEY` the system runs on scripted templates exactly as in Phase 3.
+
+## Reviewing the prompts
+
+Tests decide whether the system is correct. They cannot decide whether it sounds like someone you
+would sell a car to, and that judgement is what stands between this and a real inbox.
+
+```powershell
+uv run acqbot review --model anthropic     # ~90 calls, a few cents, writes review.md
+                                           # (checks the key and the account balance first)
+uv run acqbot review --model fake          # the same run with no network and no cost
+uv run acqbot review --persona typos --persona vague
+```
+
+Fifteen sellers, none of them the cooperative one: the seller who answers four questions at once,
+the one who hedges every answer, the one who types like a human on a phone, the one who asks a
+question every turn, the one who wants a number before anything else, the one selling their mum's
+car. Each declares what should be true at the end, so the run is scored rather than read.
+
+The report leads with **every draft the gate refused, quoted in full**. That list is the point: a
+gate rejection is the cheapest bug report a prompt can produce, because the bad message was stopped
+before a seller saw it. Each one is either a prompt that needs a line or a gate rule that is too
+tight, and it takes about a minute to tell which.
+
+Then change the wording in `llm/prompts.py`, bump `PROMPT_VERSION`, and run it again. Personas
+marked *needs a real model* are expected to fail on `--model fake` — the rule-based extractor
+cannot read a typo or a hedge, and saying so is the point of the flag.
+
+Three defects were found by writing the personas, before any model ran:
+"it's my mum's car" did not trigger the not-the-owner screen, "Alright, done" was not read as
+accepting an offer, and the gate rejected its own messages for saying "VIC" or "no hurry".
 
 ## Compliance posture
 
@@ -231,6 +268,43 @@ uv run acqbot queue                                               # job counts b
 
 ### Human console
 
+Two faces on the same code. `/console` is a screen for the sales floor; `/admin` is the same
+actions as JSON. The console's POST handlers call the very same functions `/admin` exposes, so
+there is one implementation of "present an offer" and the two cannot drift apart.
+
+#### The screen — `/console`
+
+```
+uv run acqbot serve          # then open http://127.0.0.1:8000/console
+```
+
+Sign in with `ACQBOT_ADMIN_TOKEN`. Server-rendered HTML: no template engine, no npm, no second
+system to host. Four pages:
+
+| Page | What it is for |
+|---|---|
+| `/console` | Everything waiting on a person, oldest first, each with what happened and what to do about it. Rows carry whether the automation has stopped, the conversation has closed, or the bot is still talking. |
+| `/console/leads/{id}` | One lead: the open task with its action, the ladder, offers, what is verified vs the seller's word, the transcript, and forms to resolve, present, record an outcome or record a fact. |
+| `/console/handoffs` | Agreed deals awaiting a closer, with the Figure 5 packet in prose. Claim puts your name on it. |
+| `/console/threads` | Conversations that could not be matched to a lead, with a form to link one. |
+
+Reasons are written in words a person can act on: `human_requested` renders as **Asked for a
+person — they were told they are talking to an assistant**, not as the raw string. The ladder
+reads opening → first concession → second concession → ceiling, and the ceiling is drawn
+differently because nothing automated ever offers it.
+
+**Authentication** is a cookie holding an HMAC of the admin token, never the token itself, so the
+cookie cannot be replayed into the `/admin` API and holding it does not reveal the secret.
+`SameSite=Lax` stops another site POSTing here with your cookie attached, and the whole console
+404s when `ACQBOT_ADMIN_TOKEN` is unset.
+
+> **This is adequate for a back-office screen, not for the open internet.** One shared token, no
+> per-user accounts, no audit of who signed in — only of who acted. Put it behind a VPN or an
+> authenticating proxy before it is reachable from outside the dealership, and give it its own
+> hostname so the public webhook endpoints are not on the same one.
+
+#### The API — `/admin`
+
 All endpoints under `/admin` require the `x-admin-token` header and are disabled entirely when
 `ACQBOT_ADMIN_TOKEN` is unset.
 
@@ -254,8 +328,29 @@ webhook carries the lead id that links the conversation. Configure the webhook a
 `messaging_referrals` and `messaging_postbacks`.
 
 The Messenger Platform cannot open a conversation with someone who has not messaged the Page
-first, and outbound is limited to twenty-four hours after the seller's last message. Conversations
-that go quiet beyond that window continue over SMS.
+first, and outbound is limited to twenty-four hours after the seller's last message.
+
+### Surviving that window
+
+Somewhere in discovery the bot asks for a mobile number — once, framed as how the offer reaches
+them, and never as a condition of anything. A seller who declines is still priced and still gets an
+offer; the question is simply not asked again.
+
+When the window does shut, a conversation with a number on file moves to SMS: a new thread on the
+same lead, the same conversation logic, nothing above the transport layer any the wiser. Only when
+there is genuinely nowhere to go — no number, or Twilio unconfigured — does it stop and ask a
+person. The console marks the switch in the transcript so a closer can see which messages were
+texts.
+
+A seller who goes quiet gets three nudges: one at hour twenty, while Messenger will still carry it,
+then one a day later and one three days after that. Each is short, adds nothing new, and offers an
+easy way out. After the third, the bot says it will leave them alone and the lead goes to STALLED —
+any reply picks it straight back up. It does not archive anything: the 90-day dedupe window means
+an archived lead cannot simply be re-approached, and the re-engagement policy is still open.
+
+The cadence numbers are `ACQBOT_NUDGE_BEFORE_WINDOW_CLOSES_HOURS`, `ACQBOT_SMS_NUDGE_HOURS` and
+`ACQBOT_MAX_NUDGES`. Appendix A.2 leaves them to the dealership, so the defaults are a starting
+position, not a recommendation.
 
 Both webhooks verify, parse and enqueue; the worker runs the conversation loop. The webhook
 therefore answers in milliseconds regardless of model latency, a redelivered event is deduplicated
@@ -370,11 +465,16 @@ uv run ruff check src tests
 | 2 | Valuation engine, offline | Built; **not calibrated** |
 | 3 | State machine, scripted messages, transport | Complete |
 | 4 | Language model for discovery | Complete; not yet run against a real seller |
-| 5 | Automated offer presentation | Behind `ACQBOT_AUTO_PRESENT_OFFER`; approval workflow outstanding |
-| 6 | SMS transition and nudge sequences | Not started |
+| 5 | Automated offer presentation | Complete, behind `ACQBOT_AUTO_PRESENT_OFFER` |
+| 6 | SMS transition and nudge sequences | Complete |
 
 With `ACQBOT_AUTO_PRESENT_OFFER=false` (the default) a person presents every offer and every
 counter routes to a person. The automation collects facts, verifies, prices and escalates.
+
+With it `true`, the automation presents the opening and walks the two authorised concessions. It
+stops there: the ceiling is a human decision, asked for as an approval with the figure already
+worked out. The 48-hour expiry lapses for real — the seller is told, the lead goes to the queue,
+and nothing re-offers on its own.
 
 ## Before going live
 
@@ -429,6 +529,10 @@ from someone qualified to give it.
 | `ACQBOT_HIGH_VALUE_THRESHOLD_AUD` | Escalation threshold | 60000 |
 | `ACQBOT_DEDUPE_WINDOW_DAYS` | Relisting suppression window | 90 |
 | `ACQBOT_AUTO_PRESENT_OFFER` | Automation presents offers and concessions | false |
+| `ACQBOT_SMS_MIGRATION` | Move to SMS when the Messenger window shuts | true |
+| `ACQBOT_NUDGE_BEFORE_WINDOW_CLOSES_HOURS` | First nudge, inside the 24h window | 20 |
+| `ACQBOT_SMS_NUDGE_HOURS` | Spacing of the later nudges, in hours | [24, 72] |
+| `ACQBOT_MAX_NUDGES` | Nudges before the lead stalls | 3 |
 | `ACQBOT_MIN_PHOTOS` | Photographs required to exit discovery | 6 |
 | `ACQBOT_HUMAN_SLA_HOURS` | Escalation and handoff response target | 4 |
 | `ACQBOT_*_PROVIDER` | Enrichment provider selection | stub |

@@ -60,7 +60,9 @@ COMPETITION = re.compile(
     re.I,
 )
 PRESSURE = re.compile(
-    r"\b(act now|last chance|today only|don'?t miss (out|this)|hurry|limited time|right now or|final warning|now or never)\b",
+    # "hurry up" is pressure; "no hurry" and "no rush" are the opposite and must not be rejected.
+    r"\b(act now|last chance|today only|don'?t miss (out|this)|hurry up|in a hurry|limited time|"
+    r"right now or|final warning|now or never|before it'?s too late)\b",
     re.I,
 )
 ALLOWED_CAPS = {
@@ -98,6 +100,18 @@ ALLOWED_CAPS = {
     "TSI",
     "RWD",
     "AUD",
+    # Australian state and territory codes — "registered in VIC" is not shouting.
+    "NSW",
+    "VIC",
+    "QLD",
+    "TAS",
+    "ACT",
+    "NT",
+    "REGO",
+    "VICROADS",
+    "EOFY",
+    "LPG",
+    "DPF",
 }
 
 
@@ -114,6 +128,17 @@ class GateContext:
     vehicle_make: str | None = None
     vehicle_odometer_km: int | None = None
     allowed_odometers: set[int] = field(default_factory=set)
+    # Capitals that are part of this vehicle's own name — trim levels are open-ended (GLS, GXL,
+    # SR5, XLT, VTi...) and a fixed list will always be missing one. Naming the car is not shouting.
+    allowed_caps: set[str] = field(default_factory=set)
+    # Phase 5. Once the model words offers, "on the ladder" is not a tight enough rule: told to
+    # present the opening, a model that writes the ceiling instead has written a figure the gate
+    # would wave through. When code is presenting a specific amount it names that amount here and
+    # nothing else passes — not even another authorised step.
+    sole_figure: float | None = None
+    # Exact strings the message must contain, supplied by code: the amount as we write it and the
+    # expiry as we computed it. The model may word everything around them and nothing inside them.
+    must_include: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -141,14 +166,24 @@ def validate(body: str, ctx: GateContext) -> GateResult:
     if ctx.stage not in PRICE_STATES and figures:
         v.append(f"figure before PRICED: {figures}")
     if ctx.stage in PRICE_STATES and figures:
-        allowed = set()
-        if ctx.ladder:
-            allowed |= {int(round(x)) for x in ctx.ladder.values()}
-        if ctx.current_offer is not None:
-            allowed.add(int(round(ctx.current_offer)))
-        bad = [f for f in figures if f not in allowed]
-        if bad:
-            v.append(f"figure not on the authorised ladder: {bad}")
+        if ctx.sole_figure is not None:
+            allowed = {int(round(ctx.sole_figure))}
+            bad = [f for f in figures if f not in allowed]
+            if bad:
+                v.append(f"figure other than the one being presented ({allowed.pop()}): {bad}")
+        else:
+            allowed = set()
+            if ctx.ladder:
+                allowed |= {int(round(x)) for x in ctx.ladder.values()}
+            if ctx.current_offer is not None:
+                allowed.add(int(round(ctx.current_offer)))
+            bad = [f for f in figures if f not in allowed]
+            if bad:
+                v.append(f"figure not on the authorised ladder: {bad}")
+
+    for required in ctx.must_include:
+        if required and required not in body:
+            v.append(f"must state exactly: {required!r}")
 
     if COMMITMENT.search(body):
         v.append("binding commitment language")
@@ -184,7 +219,8 @@ def validate(body: str, ctx: GateContext) -> GateResult:
         v.append(f"length {len(body)} exceeds channel maximum {ctx.max_length}")
     if "!!" in body:
         v.append("tone: repeated exclamation")
-    caps = [w for w in re.findall(r"\b[A-Z]{3,}\b", body) if w not in ALLOWED_CAPS]
+    permitted = ALLOWED_CAPS | {c.upper() for c in ctx.allowed_caps}
+    caps = [w for w in re.findall(r"\b[A-Z]{3,}\b", body) if w not in permitted]
     if caps:
         v.append(f"tone: shouting {caps[:3]}")
     if not body.strip():

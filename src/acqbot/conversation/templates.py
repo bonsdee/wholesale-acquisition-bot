@@ -114,22 +114,70 @@ def offer(amount: float, expires_at: datetime, sheet_get, identity: Identity, tz
 
 
 def concession(amount: float, expires_at: datetime, tz: str) -> str:
+    # This is said at step_1 as well as step_2, so it must not claim to be the last word: there are
+    # two authorised concessions and a ceiling above them, and a seller who is told "that's the most
+    # I've got room for" and then offered more has been misled — which is the conduct Section 1 drops
+    # the fake-competition mechanism to avoid.
     return (
-        f"I can go to {fmt_money(amount)}. That's the most I've got room for on this one — same terms, "
-        f"subject to inspection, open until {fmt_expiry(expires_at, tz)}."
+        f"I can go to {fmt_money(amount)} — same terms, subject to inspection, open until "
+        f"{fmt_expiry(expires_at, tz)}."
     )
 
 
 def at_ceiling(amount: float, identity: Identity) -> str:
+    # Nor is THIS the ceiling: it is as far as the automation goes, and a person may yet approve the
+    # real one. So it says what is true — this is not the bot's call — and promises nothing.
     return (
-        f"{fmt_money(amount)} is the ceiling for me — I can't go past it. If you'd like, {identity.agent} can take a "
-        f"look personally and come back to you."
+        f"{fmt_money(amount)} is as far as I can take it on my own. Going further isn't my call, so "
+        f"{identity.agent} will have a look and come back to you."
     )
 
 
 def accepted(identity: Identity, seller_name: str) -> str:
     first = (seller_name or "").split(" ")[0] or "there"
     return f"Great — {identity.agent} will be in touch to book the inspection and confirm the details. Thanks {first}."
+
+
+def nudge_discovery(identity: Identity, asked: str | None) -> str:
+    """A seller has gone quiet mid-discovery. One short line, no guilt, an easy way out.
+
+    Deliberately not a question they have already been asked twice — the gate would pass a nagging
+    message, so the restraint has to live in the wording."""
+    if asked:
+        return (
+            f"No rush at all — just checking you saw the question about {asked}. "
+            "If you'd rather leave it here, that's completely fine, just say so."
+        )
+    return (
+        "No rush — just checking in on the car. If you'd rather leave it here, that's completely "
+        "fine, just say so."
+    )
+
+
+def nudge_offer(identity: Identity) -> str:
+    """The offer is live and they have not replied. States nothing new and adds no deadline: the
+    real one was given with the offer and repeating it starts to read as pressure."""
+    return (
+        f"Just checking in — that offer still stands. If you'd like to go ahead, say the word and "
+        f"{identity.agent} will sort the inspection. If not, no hard feelings."
+    )
+
+
+def stalled_close(identity: Identity) -> str:
+    return (
+        "I'll leave it there so I'm not clogging up your messages. If you change your mind about "
+        "selling, reply any time and we'll pick it back up."
+    )
+
+
+def offer_lapsed(identity: Identity) -> str:
+    """Said when the 48 hours run out. Scripted, and carries no figure: the number is gone, which is
+    the whole point of a real expiry, and a message that restates it is a message that softens it."""
+    return (
+        "The 48 hours on that offer are up, so it's lapsed. "
+        f"If the car's still available and you'd like another look at it, say the word and {identity.agent} "
+        "will re-run the numbers."
+    )
 
 
 def rejected_close(expires_at: datetime, tz: str) -> str:

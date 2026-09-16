@@ -125,6 +125,21 @@ DISCOVERY_REQUIRED: tuple[FieldSpec, ...] = (
 )
 
 DISCOVERY_REQUIRED_KEYS: tuple[str, ...] = tuple(f.key for f in DISCOVERY_REQUIRED)
+
+# Asked during discovery but NOT gating (4.2 Stage 2). The mobile number is how the conversation
+# survives the Messenger 24-hour window, so it matters — but a seller who will not give one can
+# still be priced and still gets an offer, so it must never hold up DISCOVERY.
+SELLER_PHONE = FieldSpec(
+    key="seller_phone",
+    label="Mobile number",
+    why="Carries the conversation off Messenger when its 24-hour window shuts",
+    kind="text",
+    ask=(
+        "What's the best mobile for you? Marketplace hides messages after a day or so and I don't "
+        "want the offer sitting somewhere you won't see it."
+    ),
+)
+ASKED_NOT_GATING: tuple[FieldSpec, ...] = (SELLER_PHONE,)
 VERIFICATION_REQUIRED: tuple[FieldSpec, ...] = tuple(f for f in DISCOVERY_REQUIRED if f.verified_sources)
 
 # Facts recorded from the listing at ingestion (all seller assertions).
@@ -157,7 +172,7 @@ ENRICHMENT_FIELDS: tuple[str, ...] = (
 
 
 def spec_for(key: str) -> FieldSpec | None:
-    for f in DISCOVERY_REQUIRED:
+    for f in DISCOVERY_REQUIRED + ASKED_NOT_GATING:
         if f.key == key:
             return f
     return None

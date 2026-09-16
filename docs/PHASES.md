@@ -50,12 +50,35 @@ Mode: `ACQBOT_AUTO_PRESENT_OFFER=false` (default) — a person presents every of
 - Scope: discovery messages only; opening, disclosure, bot-question answer, offers and closes stay scripted; every offer still presented by a person
 - 43 new tests (unit, end-to-end through the fake client, SDK client with a mocked transport), two of them live against the API when a key is present
 
+Review harness (`acqbot review`, `personas.py`, `review.py`): 15 awkward sellers end to end, scored against per-persona expectations, reported as markdown with every gate-refused draft quoted. Found and fixed the not-the-owner screen missing "it's my mum's car", "Alright, done" not reading as acceptance, and two gate false positives.
+
+Human console (`console/`, `/console`): server-rendered queue, lead, handoffs and unlinked-threads pages over the same functions `/admin` exposes; HMAC-of-token cookie; every escalation reason written as a title and an instruction. 13 tests.
+
 Not in Phase 4: reading photos (odometer confirmation is still a human task), offer wording (Phase 5), prompt caching, Langfuse.
 
-## Phase 5 — Automated offer presentation
+## Phase 5 — Automated offer presentation ✅
 
-Already wired behind `ACQBOT_AUTO_PRESENT_OFFER`; remaining: human approval workflow for floor and above, offer-expiry follow-through, SLA return-to-queue.
+- Ladder released to the writer [5, 6.4] (`compose.py`): the model words `offer`, `concession`, `offer_restate` and `at_ceiling`; code decides the amount, the step and the expiry
+- Gate additions that make that safe: `sole_figure` (only the amount being presented, not any authorised value) and `must_include` (the amount and the expiry, word for word)
+- Prompt has two shapes (`prompt:v3`): discovery holds no figure at all; presenting holds exactly one and never the ladder, the ceiling or the band
+- Ceiling approval [5] (`ceiling_approval`): the automation walks opening → step_1 → step_2 and then asks, with the ceiling already worked out — one button in the console. Above the ceiling still raises `above_authorised_ladder`
+- The 48 hours lapse for real: EXPIRED, the seller is told, `offer_expired` to the queue, and never an automatic re-offer
+- Handoff SLA [Fig 5]: an alarm at `sla_expires_at` puts an unclaimed packet back on the queue as `handoff_sla_expired`
+- Two scripted messages found to be untrue once the automation walked the whole ladder — a concession claiming finality at step_1, and step_2 calling itself the ceiling — both rewritten
+- 12 new tests, plus a `ceiling` persona in the review harness (16 sellers)
 
-## Phase 6 — SMS transition and nudge sequences
+Mode: `ACQBOT_AUTO_PRESENT_OFFER=false` (default) — a person presents every offer and every counter routes to a person. `true` — the automation presents the opening and traverses the two authorised concessions.
 
-Phone capture → thread migration Messenger→SMS; nudge cadence inside the 24h window; STALLED/ARCHIVED policy; re-engagement for relisters.
+Not in Phase 5: nudges on a stalled offer (Phase 6), re-offering after a lapse (deliberately a human decision).
+
+## Phase 6 — SMS transition and nudge sequences ✅
+
+- Mobile capture [4.2 Stage 2] (`ASKED_NOT_GATING`): asked once, just before the photos, framed as how the offer reaches them; never gates DISCOVERY and never asked twice
+- Channel migration [4.2 Stage 3] (`_migrate_to_sms`): a shut Messenger window opens an SMS thread on the same lead and the send goes there; `send_window_closed` now means there is genuinely nowhere to go
+- Nudge cadence (`nudge` job): hour 20 inside the Messenger window, then +24h and +72h on SMS; the job recomputes its own clock, so an early firing reschedules and a reply cancels
+- Stall [Fig 3]: after the last unanswered nudge, one plain sign-off, STALLED, and a `stalled_no_reply` task. Any reply reopens it; archiving stays a human decision while the re-engagement policy is open
+- Console shows where the conversation changed channel in the transcript
+- Cadence defaults in config (`ACQBOT_NUDGE_BEFORE_WINDOW_CLOSES_HOURS`, `ACQBOT_SMS_NUDGE_HOURS`, `ACQBOT_MAX_NUDGES`, `ACQBOT_SMS_MIGRATION`) — A.2 leaves the numbers to the client
+- 11 new tests
+
+Not in Phase 6: re-engaging a seller who rejected and relisted (A.2, blocked on the 90-day dedupe policy); inbound SMS webhook wiring against a live Twilio number.

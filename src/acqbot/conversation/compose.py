@@ -30,8 +30,23 @@ from acqbot.models import Lead, LeadState, Thread
 
 log = logging.getLogger("acqbot.conversation")
 
-# What the model is allowed to write in Phase 4. Everything else stays scripted (Phase 5 widens this).
-MODEL_DIRECTIVES = frozenset({"ask_field", "clarify", "contradiction", "photos_partial", "verification_wait"})
+# What the model is allowed to write. Phase 4 was discovery only; Phase 5 adds the offer messages,
+# which the model may WORD but never CHOOSE: the amount, the step and the expiry are decided in code
+# and pinned by `sole_figure` and `must_include` on the gate context. Everything outside this set —
+# the opening disclosure, the bot-question answer, the handoff close — stays scripted.
+MODEL_DIRECTIVES = frozenset(
+    {
+        "ask_field",
+        "clarify",
+        "contradiction",
+        "photos_partial",
+        "verification_wait",
+        "offer",
+        "concession",
+        "offer_restate",
+        "at_ceiling",
+    }
+)
 
 
 @dataclass
@@ -45,6 +60,11 @@ class Directive:
     allowed_odometers: set[int] = field(default_factory=set)
     instruction: str = ""
     template_vars: dict[str, Any] = field(default_factory=dict)
+    # Phase 5 — what the gate pins when the model is wording an offer.
+    ladder: dict[str, float] | None = None
+    current_offer: float | None = None
+    sole_figure: float | None = None
+    must_include: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -145,6 +165,46 @@ def verification_wait_instruction() -> str:
     )
 
 
+# ---------------------------------------------------------------------- offers (Phase 5)
+#
+# Section 6.4 puts the entire universe of permitted figures in the ladder and says the constraint is
+# enforced in code at the gate, "not by instruction in the prompt". These instructions therefore tell
+# the model what the message has to DO; they are not what stops it inventing a number.
+
+
+def offer_instruction(*, amount: str, expiry: str, vehicle: str, first_offer: bool) -> str:
+    opening = (
+        f"This is the first offer on the {vehicle}. Lead with it — do not build up to it."
+        if first_offer
+        else "They pushed back and this is the improved number. Acknowledge the push in a few words, "
+        "then give it. Do not apologise for the earlier figure and do not say it is your last."
+    )
+    return (
+        f"{opening} State the amount as exactly {amount} and say it is subject to inspection. "
+        f"Say plainly that it is open until exactly {expiry}, and that the valuation inputs move after "
+        f"that, which is why it lapses — this is true, so say it without drama. "
+        f"Close by asking whether they want to go ahead. No other figure, no range, no hint at what "
+        f"else might be possible, nothing about other buyers, and no deadline other than the one given."
+    )
+
+
+def offer_restate_instruction(*, amount: str, expiry: str) -> str:
+    return (
+        f"They asked about the price again. Restate the same offer — exactly {amount}, subject to "
+        f"inspection, open until exactly {expiry} — without treating the question as a negotiation and "
+        f"without re-explaining the whole thing. Short. Then ask if they want to go ahead."
+    )
+
+
+def at_ceiling_instruction(*, amount: str, agent: str) -> str:
+    return (
+        f"They have countered again and the automated ladder is finished: exactly {amount} is as far as "
+        f"it goes without a person. Say the number stands, say honestly that going further is not yours "
+        f"to decide and {agent} will come back to them on it, and leave it there. Do not hint that more "
+        f"is available, do not promise more, do not ask them to counter again, and give no timeframe."
+    )
+
+
 # ------------------------------------------------------------------------------ composer
 
 
@@ -171,12 +231,16 @@ class Composer:
             return ComposeResult(body=directive.body, generator="template", model_version=T.TEMPLATE_VERSION)
 
         history = build_history(self.s, thread, lead, client=self.client, settings=self.cfg)
+        # The one figure the writer is given, or none at all. `sole_figure` is set by the planner
+        # only for an offer message, so the same flag that pins the gate also picks the prompt.
+        offer_amount = T.fmt_money(directive.sole_figure) if directive.sole_figure is not None else None
         system = generation_system(
             agent=identity.agent,
             dealership=identity.dealership,
             lmct=identity.lmct,
             channel=channel,
             max_length=gate_ctx.max_length,
+            presenting_offer=offer_amount is not None,
         ) + turn_context(
             stage=directive.stage.value,
             outstanding=outstanding,
@@ -185,6 +249,7 @@ class Composer:
             seller_first_name=seller_first_name,
             channel=channel,
             max_length=gate_ctx.max_length,
+            offer_amount=offer_amount,
         )
         messages = list(history.messages)
         notes: dict[str, Any] = {

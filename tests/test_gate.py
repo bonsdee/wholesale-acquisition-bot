@@ -73,3 +73,59 @@ def test_length_and_tone():
     assert not validate("GREAT CAR!! Send photos", ctx(LeadState.DISCOVERY)).ok
     assert validate("We run a PPSR check and need the VIN. LMCT 12345.", ctx(LeadState.DISCOVERY)).ok
     assert not validate("   ", ctx(LeadState.DISCOVERY)).ok
+
+
+def test_gate_does_not_reject_ordinary_australian_wording():
+    # False positives found while reviewing the prompts: these are all messages we WANT to send.
+    assert validate("No hurry — send it through whenever suits.", ctx(LeadState.DISCOVERY)).ok
+    assert validate("No rush at all on the photos.", ctx(LeadState.DISCOVERY)).ok
+    assert validate("Is it still registered in VIC?", ctx(LeadState.DISCOVERY)).ok
+    assert validate("What's the rego, or the VIN if it's handy?", ctx(LeadState.DISCOVERY)).ok
+    # ...and these are still rejected.
+    assert not validate("Hurry up, this is your last chance", ctx(LeadState.DISCOVERY)).ok
+    assert not validate("Reply NOW PLEASE", ctx(LeadState.DISCOVERY)).ok
+
+
+def test_the_cars_own_trim_level_is_not_shouting():
+    # Found by watching the console: the opening message for a Tucson GLS was rejected by the gate
+    # as shouting, because trim levels are three capitals and no fixed list can hold them all.
+    bad = validate("We're interested in your 2019 Hyundai Tucson GLS.", ctx(LeadState.DISCOVERY))
+    assert not bad.ok and any("shouting" in v for v in bad.violations)
+    ok = validate(
+        "We're interested in your 2019 Hyundai Tucson GLS.",
+        ctx(LeadState.DISCOVERY, allowed_caps={"Hyundai", "Tucson", "GLS"}),
+    )
+    assert ok.ok, ok.violations
+    # ...but a word that is not part of this car's name still is.
+    assert not validate(
+        "SEND THE PHOTOS", ctx(LeadState.DISCOVERY, allowed_caps={"Hyundai", "Tucson", "GLS"})
+    ).ok
+
+
+def test_an_offer_message_may_only_carry_the_one_figure_being_presented():
+    # Phase 5. Told to present the opening, a model that writes the ceiling has written a figure
+    # that IS on the ladder — so "on the ladder" is not a tight enough rule once it words offers.
+    loose = ctx(LeadState.OFFER_MADE, ladder=LADDER)
+    assert validate("We can do $18,350 for it", loose).ok  # the ceiling, waved through
+
+    tight = ctx(LeadState.OFFER_MADE, ladder=LADDER, sole_figure=16_150)
+    r = validate("We can do $18,350 for it", tight)
+    assert not r.ok and any("other than the one being presented" in v for v in r.violations)
+    assert validate("Here's where we've landed: $16,150", tight).ok
+
+
+def test_the_amount_and_the_expiry_are_pinned_word_for_word():
+    pinned = ctx(
+        LeadState.OFFER_MADE,
+        ladder=LADDER,
+        sole_figure=16_150,
+        must_include=["$16,150", "3:30pm on Friday 18 September"],
+    )
+    ok = validate(
+        "We can do $16,150, subject to inspection. It's open until 3:30pm on Friday 18 September.",
+        pinned,
+    )
+    assert ok.ok, ok.violations
+    # Right number, invented deadline: the seller would be told something untrue.
+    bad = validate("We can do $16,150, subject to inspection. Open until Friday.", pinned)
+    assert not bad.ok and any("must state exactly" in v for v in bad.violations)

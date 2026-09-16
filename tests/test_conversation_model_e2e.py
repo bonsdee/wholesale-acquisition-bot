@@ -8,9 +8,13 @@ from sqlalchemy import select
 from acqbot.conversation.gate import MONEY_RE
 from acqbot.db import session_scope
 from acqbot.demo import run_demo
+from acqbot.llm.prompts import PROMPT_VERSION
 from acqbot.models import LeadState, Message, ModelCall, Offer, StateLog, Valuation
 
 DISCOVERY_TEMPLATES = {"clarify", "contradiction", "photos_partial", "verification_wait"}
+# Phase 5: the model also words the offer messages. It still never chooses the figure — the gate
+# pins that — and these are the only templates beyond discovery it is allowed anywhere near.
+OFFER_TEMPLATES = {"offer", "concession", "offer_restate", "at_ceiling"}
 
 
 def _discipline(run):
@@ -43,9 +47,9 @@ def _discipline(run):
         notes = m.validation_notes
         assert m.validated is True and m.prompt_hash and notes["gate"]["ok"]
         template = notes["template"]
-        is_discovery = template.startswith("ask:") or template in DISCOVERY_TEMPLATES
-        if is_discovery:
-            assert notes["generator"] == "model" and m.model_version.endswith("|prompt:v1")
+        written = template.startswith("ask:") or template in DISCOVERY_TEMPLATES | OFFER_TEMPLATES
+        if written:
+            assert notes["generator"] == "model" and m.model_version.endswith(f"|{PROMPT_VERSION}")
         else:
             assert notes["generator"] == "template" and m.model_version == "template:v1"
         figures = [int(x.replace(",", "")) for x in MONEY_RE.findall(m.body)]
@@ -60,11 +64,20 @@ def _discipline(run):
     assert len(generates) == sum(1 for m in outbound if m.validation_notes["generator"] == "model")
     for c in calls:
         assert c.error is None and c.response["parsed"] is not None
-        assert "$" not in c.request["system"]
-        if c.purpose == "generate":
-            assert "Valuation: NOT RELEASED" in c.request["system"]
-            assert "ladder" not in c.request["system"].lower()
-            assert c.request["messages"][-1]["role"] == "user"
+        system = c.request["system"]
+        if c.purpose != "generate":
+            assert "$" not in system
+            continue
+        assert c.request["messages"][-1]["role"] == "user"
+        # The writer never sees the ladder it sits on, the engine's working, or the asking price.
+        assert "ladder" not in system.lower() and "wholesale" not in system.lower()
+        figures = {int(x.replace(",", "")) for x in MONEY_RE.findall(system)}
+        if "Valuation: NOT RELEASED" in system:
+            assert figures == set(), f"a figure reached a discovery prompt: {sorted(figures)}"
+        else:
+            # Presenting: exactly one figure, and it is one the valuation engine authorised.
+            assert len(figures) == 1, f"the writer was given {len(figures)} figures: {sorted(figures)}"
+            assert figures <= ladder_values
 
 
 def test_happy_path_with_the_model_in_the_loop():

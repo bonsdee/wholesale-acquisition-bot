@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from acqbot.config import Settings, get_settings
+from acqbot.conversation import compose as C
 from acqbot.conversation import templates as T
 from acqbot.conversation.compose import (
     Composer,
@@ -46,15 +48,17 @@ from acqbot.conversation.history import as_turns
 from acqbot.conversation.state import PRICE_VISIBLE_STATES, Signals, StageView, compute_stage
 from acqbot.conversation.transitions import create_task, escalate, transition
 from acqbot.enrichment import catalog
-from acqbot.facts.fields import STATED_CONFIDENCE, spec_for
+from acqbot.facts.fields import SELLER_PHONE, STATED_CONFIDENCE, spec_for
 from acqbot.facts.store import FactSheet, fact_sheet, record_fact
 from acqbot.ingestion.service import request_reenrichment
 from acqbot.llm.client import ModelClient
 from acqbot.llm.registry import get_model_client
 from acqbot.models import (
+    Channel,
     Direction,
     Escalation,
     FactSource,
+    HandoffPacket,
     LadderStep,
     Lead,
     LeadState,
@@ -86,6 +90,15 @@ LADDER_ORDER = [
 ]  # floor is not reachable by automation
 # Fact-store rows that are conversation bookkeeping, not vehicle facts: never count as progress.
 BOOKKEEPING_FIELDS = ("seller_notes", "deferred_fields")
+# States where the ball is in the seller's court, so silence is worth chasing. Everything else is
+# either ours to act on (VERIFICATION, PRICED), a person's (HUMAN), or over.
+WAITING_STATES = {
+    LeadState.CONTACTED,
+    LeadState.ENGAGED,
+    LeadState.DISCOVERY,
+    LeadState.OFFER_MADE,
+    LeadState.NEGOTIATING,
+}
 
 
 @dataclass
@@ -241,6 +254,144 @@ class Conversation:
             return last.validation_notes.get("asked_field")
         return None
 
+    # ------------------------------------------------------------------ nudges (Phase 6)
+
+    def nudge_schedule(self) -> list[int]:
+        """Hours of silence before each nudge, measured from our last message.
+
+        The first sits inside Messenger's 24-hour window — 4.2 says design the cadence *around* that
+        window, and a nudge at hour 20 is the last one we may legally send on-platform. The rest are
+        spaced for SMS, where there is no window but there are manners."""
+        hours = [self.cfg.nudge_before_window_closes_hours, *self.cfg.sms_nudge_hours]
+        return hours[: max(0, self.cfg.max_nudges)]
+
+    def _nudges_sent(self, lead: Lead) -> int:
+        return (
+            self.s.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.lead_id == lead.lead_id,
+                    Message.direction == Direction.OUTBOUND,
+                    Message.validation_notes["template"].astext.startswith("nudge"),
+                )
+            )
+            or 0
+        )
+
+    def nudge(self, lead: Lead, thread: Thread) -> HandleResult:
+        """Chase a quiet seller, or give up on one. Called by the `nudge` job.
+
+        The job's own timing is not trusted: the clock is recomputed from the last message every
+        time, so an early firing reschedules itself and a late one still does the right thing."""
+        if lead.state not in WAITING_STATES:
+            return HandleResult(action="nudge_skipped", lead_id=lead.lead_id, stage=lead.state.value)
+        last_out = self._last_outbound(lead)
+        if last_out is None:
+            return HandleResult(action="nudge_skipped", lead_id=lead.lead_id)
+        if thread.last_inbound_at and thread.last_inbound_at > last_out.sent_at:
+            return HandleResult(action="nudge_not_needed", lead_id=lead.lead_id)  # they replied
+
+        schedule = self.nudge_schedule()
+        sent = self._nudges_sent(lead)
+        last_at = last_out.sent_at if last_out.sent_at.tzinfo else last_out.sent_at.replace(tzinfo=UTC)
+        if sent >= len(schedule):
+            return self._stall(lead, thread)
+        due_at = last_at + timedelta(hours=schedule[sent])
+        if due_at > datetime.now(UTC):
+            self._schedule_nudge(lead, due_at)  # fired early; come back when it is actually due
+            return HandleResult(action="nudge_deferred", lead_id=lead.lead_id)
+
+        asked = self._pending_field(lead)
+        spec = spec_for(asked) if asked else None
+        if lead.state in {LeadState.OFFER_MADE, LeadState.NEGOTIATING}:
+            body, template = T.nudge_offer(self.identity(lead)), "nudge_offer"
+        else:
+            label = spec.label.lower() if spec else None
+            body, template = T.nudge_discovery(self.identity(lead), label), "nudge_discovery"
+        msg = self._send(lead, thread, body, template, asked_field=asked, stage=lead.state)
+        if msg is None:
+            # No open window and nowhere to migrate to: there is no way to reach this seller, and
+            # queueing three more undeliverable nudges helps nobody.
+            return self._stall(lead, thread)
+        self._schedule_nudge(
+            lead, datetime.now(UTC) + timedelta(hours=schedule[min(sent + 1, len(schedule) - 1)])
+        )
+        return HandleResult(action="nudged", lead_id=lead.lead_id, stage=lead.state.value, sent=msg.body)
+
+    def _stall(self, lead: Lead, thread: Thread) -> HandleResult:
+        """Out of nudges. Say so once, mark it STALLED, and leave archiving to a person — the
+        re-engagement policy is still an open question (A.2) and is not ours to invent."""
+        sent = None
+        if self._nudges_sent(lead):
+            sent = self._send(
+                lead, thread, T.stalled_close(self.identity(lead)), "stalled_close", stage=lead.state
+            )
+        transition(self.s, lead, LeadState.STALLED, "no_reply_after_nudges")
+        create_task(self.s, lead, "stalled_no_reply", {"nudges": self._nudges_sent(lead)})
+        return HandleResult(
+            action="stalled",
+            lead_id=lead.lead_id,
+            stage=lead.state.value,
+            sent=sent.body if sent else None,
+        )
+
+    def _schedule_nudge(self, lead: Lead, run_at: datetime) -> None:
+        enqueue(
+            self.s,
+            "nudge",
+            {"lead_id": str(lead.lead_id)},
+            run_at=run_at,
+            dedupe_key=f"nudge:{lead.lead_id}:{run_at.isoformat(timespec='minutes')}",
+        )
+
+    def _migrate_to_sms(self, lead: Lead, thread: Thread) -> tuple[Transport, Thread] | None:
+        """4.2 Stage 3 — carry the conversation off Messenger when its window shuts.
+
+        Returns the SMS transport and thread, or None when there is nothing to move to: no number on
+        file, Twilio not configured, or we are already on SMS. The orchestrator above this line never
+        learns which channel carried the message (4.3) — it just gets a send that worked."""
+        from acqbot.transport.registry import get_transport
+
+        if thread.channel == Channel.SMS or not self.cfg.sms_migration:
+            return None
+        phone = fact_sheet(self.s, lead.lead_id).get("seller_phone")
+        if not phone:
+            return None
+        try:
+            transport = get_transport(Channel.SMS)
+        except RuntimeError as exc:  # Twilio not configured — a person has to pick this up
+            log.warning("cannot migrate lead %s to SMS: %s", lead.lead_id, exc)
+            return None
+        sms = self.s.scalars(
+            select(Thread)
+            .where(Thread.lead_id == lead.lead_id, Thread.channel == Channel.SMS)
+            .order_by(Thread.created_at.desc())
+        ).first()
+        if sms is None:
+            sms = Thread(channel=Channel.SMS, external_id=str(phone), lead_id=lead.lead_id)
+            self.s.add(sms)
+            self.s.flush()
+            # No state transition: the deal did not move, the wire did. The new thread row and the
+            # thread_id on every message are the record of where the conversation changed channel.
+            log.info("lead %s moved from %s to SMS", lead.lead_id, thread.channel.value)
+        return transport, sms
+
+    def _ever_asked(self, lead: Lead, field_key: str) -> bool:
+        """Whether any outbound has already asked for this field. Used for the fields we ask once
+        and then let go — pressing a seller twice for their phone number is how you lose them."""
+        return bool(
+            self.s.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.lead_id == lead.lead_id,
+                    Message.direction == Direction.OUTBOUND,
+                    Message.validation_notes["asked_field"].astext == field_key,
+                )
+            )
+        )
+
     def _turns_without_progress(self, lead: Lead) -> int:
         """Consecutive inbound messages since the last recorded fact, state change or offer."""
         from acqbot.models import StateLog, VehicleFact
@@ -286,6 +437,8 @@ class Conversation:
         current_offer: float | None = None,
         allowed_years: set[int] | None = None,
         allowed_odometers: set[int] | None = None,
+        sole_figure: float | None = None,
+        must_include: list[str] | None = None,
     ) -> GateContext:
         def _int(v: Any) -> int | None:
             try:
@@ -293,6 +446,12 @@ class Conversation:
             except (TypeError, ValueError):
                 return None
 
+        # The car's own name, tokenised: "Landcruiser Prado GXL" contributes GXL, so naming the
+        # vehicle is never mistaken for shouting.
+        caps: set[str] = set()
+        for part in (sheet.get("make"), sheet.get("model"), sheet.get("variant")):
+            if isinstance(part, str):
+                caps |= {tok for tok in re.split(r"[^A-Za-z0-9]+", part) if tok}
         return GateContext(
             stage=stage,
             ladder=ladder,
@@ -303,6 +462,9 @@ class Conversation:
             vehicle_make=sheet.get("make"),
             vehicle_odometer_km=_int(sheet.get("odometer_km")),
             allowed_odometers=allowed_odometers or set(),
+            allowed_caps=caps,
+            sole_figure=sole_figure,
+            must_include=list(must_include or []),
         )
 
     def _send(
@@ -318,6 +480,8 @@ class Conversation:
         current_offer: float | None = None,
         allowed_years: set[int] | None = None,
         allowed_odometers: set[int] | None = None,
+        sole_figure: float | None = None,
+        must_include: list[str] | None = None,
         model_version: str | None = None,
         prompt_hash: str | None = None,
         generator: str = "template",
@@ -332,6 +496,8 @@ class Conversation:
             current_offer=current_offer,
             allowed_years=allowed_years,
             allowed_odometers=allowed_odometers,
+            sole_figure=sole_figure,
+            must_include=must_include,
         )
         gate = validate(body, ctx)
         if not gate.ok:
@@ -341,13 +507,21 @@ class Conversation:
             )
             return None
         info = ThreadInfo(external_id=thread.external_id, last_inbound_at=thread.last_inbound_at)
-        if not self.t.send_window_open(info):
-            create_task(
-                self.s, lead, "send_window_closed", {"template": template_id, "channel": thread.channel.value}
-            )
-            return None
+        transport = self.t
+        if not transport.send_window_open(info):
+            moved = self._migrate_to_sms(lead, thread)
+            if moved is None:
+                create_task(
+                    self.s,
+                    lead,
+                    "send_window_closed",
+                    {"template": template_id, "channel": thread.channel.value},
+                )
+                return None
+            transport, thread = moved
+            info = ThreadInfo(external_id=thread.external_id, last_inbound_at=thread.last_inbound_at)
         try:
-            receipt = self.t.send(info, body)
+            receipt = transport.send(info, body)
         except TransportError as exc:
             if exc.retryable:
                 raise
@@ -374,6 +548,10 @@ class Conversation:
         self.s.add(msg)
         thread.last_outbound_at = msg.sent_at
         self.s.flush()
+        if (stage or lead.state) in WAITING_STATES and not template_id.startswith(("nudge", "stalled")):
+            self._schedule_nudge(
+                lead, msg.sent_at + timedelta(hours=self.cfg.nudge_before_window_closes_hours)
+            )
         return msg
 
     def send_opening(self, lead: Lead, thread: Thread) -> Message | None:
@@ -752,6 +930,31 @@ class Conversation:
                     ),
                     template_vars={"field": spec.key},
                 )
+            # 4.2 Stage 2 — the mobile number, asked once, just before the photos. The spec calls
+            # this an early objective; asked on turn two, before a single question about the car, it
+            # reads as a data grab, and the framing the spec relies on ("a step toward being paid")
+            # only becomes true this late. Declined once, it is never asked again and never blocks.
+            if (
+                spec.key == "photos"
+                and not sheet.get("seller_phone")
+                and pending != SELLER_PHONE.key
+                and not self._ever_asked(lead, SELLER_PHONE.key)
+            ):
+                return Directive(
+                    kind="ask_field",
+                    template_id=f"ask:{SELLER_PHONE.key}",
+                    body=T.ask_field(SELLER_PHONE, preface="Thanks. " if changed else ""),
+                    stage=view.stage,
+                    asked_field=SELLER_PHONE.key,
+                    instruction=ask_field_instruction(
+                        SELLER_PHONE,
+                        recorded=[k for k in recorded if k not in BOOKKEEPING_FIELDS],
+                        seller_question=ex.seller_question,
+                        deferred=deferred_label,
+                        agent=agent,
+                    ),
+                    template_vars={"field": SELLER_PHONE.key},
+                )
             if spec.key == "photos":
                 have = len(sheet.get("photos") or [])
                 if 0 < have < self.cfg.min_photos:
@@ -800,21 +1003,25 @@ class Conversation:
         return None
 
     def _deliver(
-        self, lead: Lead, thread: Thread, directive: Directive, view: StageView, sheet: FactSheet
+        self, lead: Lead, thread: Thread, directive: Directive, view: StageView | None, sheet: FactSheet
     ) -> Message | None:
         """Stages 5–7: word it (model or script), gate it, send it, log it."""
         gate_ctx = self._gate_ctx(
             sheet,
             directive.stage,
+            ladder=directive.ladder,
+            current_offer=directive.current_offer,
             allowed_years=directive.allowed_years,
             allowed_odometers=directive.allowed_odometers,
+            sole_figure=directive.sole_figure,
+            must_include=directive.must_include,
         )
         result = Composer(self.s, self.model, self.cfg).compose(
             lead,
             thread,
             directive,
             sheet=sheet,
-            outstanding=view.outstanding,
+            outstanding=view.outstanding if view else [],
             identity=self.identity(lead),
             seller_first_name=(lead.upstream_payload.get("seller", {}).get("display_name") or "").split(" ")[
                 0
@@ -834,8 +1041,12 @@ class Conversation:
             directive.template_id,
             asked_field=directive.asked_field,
             stage=directive.stage,
+            ladder=directive.ladder,
+            current_offer=directive.current_offer,
             allowed_years=directive.allowed_years,
             allowed_odometers=directive.allowed_odometers,
+            sole_figure=directive.sole_figure,
+            must_include=directive.must_include,
             model_version=result.model_version,
             prompt_hash=result.notes.get("prompt_hash"),
             generator=result.generator,
@@ -936,22 +1147,32 @@ class Conversation:
         thread = self.thread_for_lead(lead)
         if thread is not None:
             sheet = fact_sheet(self.s, lead.lead_id)
-            if prev is None:
-                body, tid = (
-                    T.offer(amount, expires, sheet.get, self.identity(lead), self.cfg.timezone),
-                    "offer",
-                )
-            else:
-                body, tid = T.concession(amount, expires, self.cfg.timezone), "concession"
-            self._send(
+            first = prev is None
+            expiry_phrase = T.fmt_expiry(expires, self.cfg.timezone)
+            body = (
+                T.offer(amount, expires, sheet.get, self.identity(lead), self.cfg.timezone)
+                if first
+                else T.concession(amount, expires, self.cfg.timezone)
+            )
+            self._deliver(
                 lead,
                 thread,
-                body,
-                tid,
-                stage=LeadState.OFFER_MADE,
-                ladder=val.ladder,
-                current_offer=amount,
-                amount=amount,
+                self._offer_directive(
+                    kind="offer" if first else "concession",
+                    body=body,
+                    instruction=C.offer_instruction(
+                        amount=T.fmt_money(amount),
+                        expiry=expiry_phrase,
+                        vehicle=T._vehicle(sheet.get) or "the car",
+                        first_offer=first,
+                    ),
+                    amount=amount,
+                    ladder=val.ladder,
+                    expiry_phrase=expiry_phrase,
+                    stage=LeadState.OFFER_MADE,
+                ),
+                None,
+                sheet,
             )
         enqueue(
             self.s,
@@ -963,10 +1184,79 @@ class Conversation:
         self._resolve_offer_tasks(lead, presented_by, offer)
         return offer
 
+    def notify_offer_lapsed(self, lead: Lead, thread: Thread) -> Message | None:
+        """Tell the seller the 48 hours are up. Scripted on purpose — there is no figure to word,
+        and outside the Messenger window this correctly becomes a `send_window_closed` task rather
+        than an illegal send."""
+        return self._send(lead, thread, T.offer_lapsed(self.identity(lead)), "offer_lapsed", stage=lead.state)
+
+    def _ceiling_request(
+        self,
+        lead: Lead,
+        offer: Offer,
+        counter: float | None,
+        ladder: dict[str, float] | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """The automated ladder is spent. Ask a person for the ceiling, with the sum already done.
+
+        Two different questions, so two different reasons: a counter the ceiling would cover is an
+        approval ("yes, go to $X"), and one above it is a decision that needs an amount."""
+        floor = float(ladder["floor"]) if ladder and "floor" in ladder else None
+        details: dict[str, Any] = {
+            "counter": counter,
+            "last_step": offer.ladder_step.value,
+            "amount": float(offer.amount),
+            "ceiling": floor,
+            "gap": (round(counter - float(offer.amount), 2) if counter is not None else None),
+        }
+        within_ceiling = floor is not None and (counter is None or counter <= floor)
+        reason = "ceiling_approval" if within_ceiling else "above_authorised_ladder"
+        escalate(self.s, lead, reason, details)
+        return reason, details
+
+    def _offer_directive(
+        self,
+        *,
+        kind: str,
+        body: str,
+        instruction: str,
+        amount: float,
+        ladder: dict[str, float] | None,
+        expiry_phrase: str | None,
+        stage: LeadState,
+    ) -> Directive:
+        """An offer message the model may word but not author.
+
+        `sole_figure` narrows the gate from "any authorised ladder value" to this one amount, and
+        `must_include` pins the amount and the expiry as code wrote them. Between them the model can
+        change every word of an offer and none of its content."""
+        money = T.fmt_money(amount)
+        return Directive(
+            kind=kind,
+            template_id=kind,
+            body=body,
+            stage=stage,
+            instruction=instruction,
+            ladder=ladder,
+            current_offer=amount,
+            sole_figure=amount,
+            must_include=[money] + ([expiry_phrase] if expiry_phrase else []),
+            template_vars={"amount": amount},
+        )
+
     def _resolve_offer_tasks(self, lead: Lead, by: str, offer: Offer) -> None:
         for e in self.s.query(Escalation).filter(
             Escalation.lead_id == lead.lead_id,
-            Escalation.reason.in_(["offer_presentation", "offer_response_needed"]),
+            Escalation.reason.in_(
+                [
+                    "offer_presentation",
+                    "offer_response_needed",
+                    "offer_expired",
+                    # Presenting the ceiling IS the answer to the request to present the ceiling.
+                    "ceiling_approval",
+                    "above_authorised_ladder",
+                ]
+            ),
             Escalation.resolved_at.is_(None),
         ):
             e.resolved_by, e.resolution, e.resolved_at = (
@@ -1017,6 +1307,15 @@ class Conversation:
                 lead,
                 "handoff",
                 {"packet_id": str(packet.packet_id), "sla_expires_at": packet.sla_expires_at.isoformat()},
+            )
+            # Figure 5: "an expired packet returns to the queue with a flag rather than going
+            # silent." The timer starts now, so the alarm is set now.
+            enqueue(
+                self.s,
+                "handoff_sla",
+                {"packet_id": str(packet.packet_id)},
+                run_at=packet.sla_expires_at,
+                dedupe_key=f"handoff_sla:{packet.packet_id}",
             )
             return HandleResult(
                 action="accepted",
@@ -1076,30 +1375,33 @@ class Conversation:
                     stage=lead.state.value,
                     details={"amount": float(new.amount), "step": nxt.value},
                 )
-            sent = self._send(
+            sent = self._deliver(
                 lead,
                 thread,
-                T.at_ceiling(float(offer.amount), self.identity(lead)),
-                "at_ceiling",
-                stage=LeadState.NEGOTIATING,
-                ladder=ladder,
-                current_offer=float(offer.amount),
+                self._offer_directive(
+                    kind="at_ceiling",
+                    body=T.at_ceiling(float(offer.amount), self.identity(lead)),
+                    instruction=C.at_ceiling_instruction(
+                        amount=T.fmt_money(float(offer.amount)), agent=self.identity(lead).agent
+                    ),
+                    amount=float(offer.amount),
+                    ladder=ladder,
+                    expiry_phrase=None,
+                    stage=LeadState.NEGOTIATING,
+                ),
+                None,
+                fact_sheet(self.s, lead.lead_id),
             )
-            escalate(
-                self.s,
-                lead,
-                "above_authorised_ladder",
-                {
-                    "counter": counter,
-                    "last_step": offer.ladder_step.value,
-                    "amount": float(offer.amount),
-                },
-            )
+            # Section 6.4: the ceiling is a human decision. The automation does not present it and
+            # does not decide against it either — it asks, with the figure already worked out, so
+            # approving is one click rather than a fresh judgement call.
+            reason, details = self._ceiling_request(lead, offer, counter, ladder)
             return HandleResult(
                 action="escalated",
                 lead_id=lead.lead_id,
                 stage=lead.state.value,
-                escalated="above_authorised_ladder",
+                escalated=reason,
+                details=details,
                 sent=sent.body if sent else None,
             )
 
@@ -1108,15 +1410,23 @@ class Conversation:
             body = T.offer(
                 float(offer.amount), offer.expires_at, sheet.get, self.identity(lead), self.cfg.timezone
             )
-            sent = self._send(
+            expiry_phrase = T.fmt_expiry(offer.expires_at, self.cfg.timezone)
+            sent = self._deliver(
                 lead,
                 thread,
-                body,
-                "offer_restate",
-                stage=lead.state,
-                ladder=ladder,
-                current_offer=float(offer.amount),
-                amount=float(offer.amount),
+                self._offer_directive(
+                    kind="offer_restate",
+                    body=body,
+                    instruction=C.offer_restate_instruction(
+                        amount=T.fmt_money(float(offer.amount)), expiry=expiry_phrase
+                    ),
+                    amount=float(offer.amount),
+                    ladder=ladder,
+                    expiry_phrase=expiry_phrase,
+                    stage=lead.state,
+                ),
+                None,
+                sheet,
             )
             return HandleResult(
                 action="restated",
@@ -1245,13 +1555,55 @@ def register_handlers() -> None:
             return
         offer.outcome, offer.outcome_at = OfferOutcome.EXPIRED, datetime.now(UTC)
         lead = session.get(Lead, offer.lead_id)
-        if lead is not None and lead.state in {LeadState.OFFER_MADE, LeadState.NEGOTIATING}:
-            create_task(
-                session,
-                lead,
-                "offer_expired",
-                {"offer_id": str(offer.offer_id), "amount": float(offer.amount)},
-            )
+        if lead is None or lead.state not in {LeadState.OFFER_MADE, LeadState.NEGOTIATING}:
+            return
+        # An expiry nobody is told about is not an expiry, it is a number quietly still on the table.
+        # Say it plainly — and never re-offer automatically, which would make the deadline a lie.
+        pair = _conversation_for(session, lead)
+        if pair is not None:
+            pair[0].notify_offer_lapsed(lead, pair[1])
+        create_task(
+            session,
+            lead,
+            "offer_expired",
+            {"offer_id": str(offer.offer_id), "amount": float(offer.amount)},
+        )
+
+    @job_handler("nudge")
+    def _nudge(session: Session, payload: dict[str, Any]) -> None:
+        lead = session.get(Lead, uuid.UUID(payload["lead_id"]))
+        if lead is None:
+            return
+        pair = _conversation_for(session, lead)
+        if pair is None:
+            return
+        pair[0].nudge(lead, pair[1])
+
+    @job_handler("handoff_sla")
+    def _handoff_sla(session: Session, payload: dict[str, Any]) -> None:
+        """An agreed deal that nobody picked up is the most expensive thing this system can produce:
+        the seller has been told yes and is waiting. It goes back on the queue, loudly."""
+        packet = session.get(HandoffPacket, uuid.UUID(payload["packet_id"]))
+        if packet is None or packet.claimed_at is not None:
+            return
+        expires = packet.sla_expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        if expires > datetime.now(UTC):
+            return
+        lead = session.get(Lead, packet.lead_id)
+        if lead is None:
+            return
+        create_task(
+            session,
+            lead,
+            "handoff_sla_expired",
+            {
+                "packet_id": str(packet.packet_id),
+                "agreed_price_aud": packet.packet.get("agreed_price_aud"),
+                "sla_expires_at": expires.isoformat(),
+            },
+        )
 
 
 register_handlers()

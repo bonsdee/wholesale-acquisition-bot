@@ -159,3 +159,37 @@ def test_extract_photos_and_phone():
         stage_priced=False,
     )
     assert ex.photo_urls == ["https://x/1.jpg"] and ex.phone == "+61412345678"
+
+
+def test_acceptance_survives_a_filler_word_in_front_of_it():
+    # "Alright, done" ended a review run stuck in NEGOTIATING with the ladder exhausted.
+    def intents(t):
+        return extract(t, [], pending_field=None, stage_priced=True).intents
+
+    for yes in ("Alright, done", "Ok then, deal", "Yeah, that'll do", "Great, sounds good", "done", "Yes"):
+        assert "accept" in intents(yes), yes
+    for no in ("yeah nah", "Alright, no thanks", "nah mate", "no deal"):
+        assert "accept" not in intents(no), no
+    assert "reject" in intents("yeah nah")
+
+
+def test_selling_someone_elses_car_is_a_screen():
+    # "it's my mum's car" is the commonest phrasing and was missed until the review harness ran it.
+    def flags(t):
+        return extract(t, [], pending_field=None, stage_priced=False).flags
+
+    for text in (
+        "Hi, it's my mum's car but I'm handling the sale for her",
+        "it's my nan's car",
+        "selling it for my brother",
+        "the car belongs to my wife",
+        "I have power of attorney for her",
+    ):
+        assert "minor_or_no_authority" in flags(text), text
+    for text in (
+        "my car is a 2016 Tucson",
+        "I'm selling my car because we had a baby",
+        "my wife drives it mostly",
+        "my brother has the same car",
+    ):
+        assert "minor_or_no_authority" not in flags(text), text

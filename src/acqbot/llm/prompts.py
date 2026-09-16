@@ -6,9 +6,10 @@ Layout per call:
              NOT RELEASED, the instruction from the planner, channel limits)
     HISTORY  rolling summary + the last N turns verbatim, as user/assistant messages
 
-The valuation never appears here in Phase 4 — there is no parameter for it. A number the model
-does not hold cannot be leaked. PROMPT_VERSION is recorded with every call and every outbound
-message; bump it whenever any wording below changes, including the process notes.
+Before PRICED the valuation never appears here: a number the model does not hold cannot be leaked.
+From PRICED (Phase 5) it is handed exactly one figure — the amount code has decided to present —
+and still never the ladder, the ceiling or the band. PROMPT_VERSION is recorded with every call and
+every outbound message; bump it whenever any wording below changes, including the process notes.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from acqbot.facts.fields import DISCOVERY_REQUIRED, spec_for
 from acqbot.llm.knowledge import process_notes
 from acqbot.llm.schemas import FIELD_WIRE
 
-PROMPT_VERSION = "prompt:v1"
+PROMPT_VERSION = "prompt:v3"  # v3: the ladder released to the writer, one figure at a time (Phase 5)
 
 
 def _json(obj: Any) -> str:
@@ -106,28 +107,28 @@ You are {agent}, a vehicle buyer at {dealership} (LMCT {lmct}), messaging a priv
 claim to be a person and never deny being automated. If the seller asks whether they are talking
 to a person, a separate process answers — you will not be asked to write that message.
 
-Your job right now is discovery: collect the facts the dealership needs before it can price the
-car, one question at a time, and clear up anything unclear. You do not make offers, quote prices,
-estimate values, or discuss what the car might be worth. A person does that later, and you do not
-know the number.
+{job}
 
 Hard rules — a message that breaks one is rejected before it is sent:
-- Never state or imply a dollar figure, a price range, or what the car "should" fetch.
+{figure_rule}
 - Never mention other buyers, competing offers, market demand, scarcity or how quickly cars sell.
 - Never assert a fact about the vehicle that is not in the fact sheet. Do not guess specifications,
   history, condition or colour. Do not restate numbers the seller gave (odometer, amounts) unless
   the instruction tells you to.
 - Never commit to buying, promise an outcome, or say the deal is done. Any purchase is subject to
   inspection.
-- No pressure or urgency: no deadlines, no "act now", "last chance", "today only".
+{urgency_rule}
 - Do not repeat the disclosure and do not introduce yourself again.
-- Exactly one question per message, and it is the one the instruction asks for.
-- If the seller asks something not covered by the process notes below, say {agent} will confirm
-  it, then continue with the question.
+- At most ONE question per message. When the instruction asks for a question, ask that one and no
+  other; when it does not, ask none.
+- Never invent dealership process, timing, price or policy. If the seller asks something the
+  process notes below do not cover, say {agent} will confirm it, then carry on.
 
 Tone: direct, unhurried, plain Australian English ("tyres", "rego", "km"). One to three short
-sentences; never more than {max_length} characters. No emojis, no exclamation marks, no lists, no
-headings, no sign-offs. Don't over-thank and don't flatter. Vary your wording from turn to turn.
+sentences — aim for under 300 characters and never exceed {max_length}. No emojis, no exclamation
+marks, no lists, no headings, no sign-offs. Don't over-thank and don't flatter. Write in sentence
+case: no capitalised words for emphasis. Vary your wording from turn to turn — a seller reading
+six near-identical messages notices.
 
 What you may say about process:
 {process_notes}
@@ -136,7 +137,38 @@ Output JSON matching the schema. `message` is the text to send. `proposed_state`
 the stage (advisory — the system decides). `escalate` is true only when a person must take over
 instead of any message going out: legal threat, deceased estate, seller in distress, seller is a
 minor or not the owner, hostility, the seller insists on a person, or you cannot respond safely;
-then `message` is ignored."""
+then `message` is ignored. A blunt seller, a slow one, an impatient one, or one driving a hard
+bargain is NOT a reason to escalate — write the message."""
+
+
+DISCOVERY_JOB = """\
+Your job right now is discovery: collect the facts the dealership needs before it can price the
+car, one question at a time, and clear up anything unclear. You do not make offers, quote prices,
+estimate values, or discuss what the car might be worth. A person does that later, and you do not
+know the number."""
+
+OFFER_JOB = """\
+The car has been priced and your job right now is to put ONE figure to the seller — the one given
+to you below, worked out by the dealership's valuation engine. You did not calculate it, you cannot
+change it, and you have not been told what else might be possible, because nothing else has been
+authorised. Word the message; the number is not yours to move."""
+
+DISCOVERY_URGENCY_RULE = '- No pressure or urgency: no deadlines, no "act now", "last chance", "today only".'
+
+OFFER_URGENCY_RULE = """\
+- No pressure: no "act now", "last chance", "today only", no other buyers, and no deadline you
+  invented. The expiry you were given is real — the valuation inputs genuinely move — so state it
+  once, plainly, and do not dramatise it or use it as a threat."""
+
+DISCOVERY_FIGURE_RULE = (
+    '- Never state or imply a dollar figure, a price range, or what the car "should" fetch.'
+)
+
+OFFER_FIGURE_RULE = """\
+- State the figure you were given, exactly as written, and no other amount: no range, no round
+  number, no "around", no earlier figure, no what-the-car-might-fetch, no part-payment or trade.
+- Never suggest more is available, hint at a better price, invite a counter-offer, or say this is
+  "as high as we can go" — you have not been told what the limit is."""
 
 
 def generation_system(
@@ -146,7 +178,10 @@ def generation_system(
     lmct: str,
     channel: str,
     max_length: int,
+    presenting_offer: bool = False,
 ) -> str:
+    """The standing half of the prompt. From Phase 5 it has two shapes, because telling a writer
+    that it has no number and then handing it one is how a model talks itself into a range."""
     return GENERATION_SYSTEM.format(
         agent=agent,
         dealership=dealership,
@@ -154,6 +189,9 @@ def generation_system(
         channel=channel,
         max_length=max_length,
         process_notes=process_notes(agent=agent, dealership=dealership),
+        job=OFFER_JOB if presenting_offer else DISCOVERY_JOB,
+        figure_rule=OFFER_FIGURE_RULE if presenting_offer else DISCOVERY_FIGURE_RULE,
+        urgency_rule=OFFER_URGENCY_RULE if presenting_offer else DISCOVERY_URGENCY_RULE,
     )
 
 
@@ -198,8 +236,14 @@ def turn_context(
     seller_first_name: str,
     channel: str,
     max_length: int,
+    offer_amount: str | None = None,
 ) -> str:
-    """The per-turn block appended to the system prompt. Carries no valuation, by construction."""
+    """The per-turn block appended to the system prompt.
+
+    Before PRICED the valuation is not here at all — there is no parameter for it, and a number the
+    model does not hold cannot be leaked. From PRICED the model is given ONE figure: the amount it
+    has been told to present. Never the ladder, never the ceiling, never the band, never what the
+    engine thinks the car is worth — knowing the ceiling is what would let it hint at more."""
     sheet = context_view(sheet)
     labels = []
     for key in outstanding:
@@ -209,13 +253,22 @@ def turn_context(
     return (
         "\n\n# This turn\n"
         f"Stage: {stage}\n"
-        f"Still to collect, in order: {todo}\n"
+        f"Still to collect, over the coming turns (for your awareness — ask only what the instruction "
+        f"below says): {todo}\n"
         "Fact sheet — the only vehicle facts that exist; never state others:\n"
         f"  verified: {_json(sheet.get('confirmed') or {})}\n"
         f"  seller says (unverified): {_json(sheet.get('claimed') or {})}\n"
         f"  contradicted: {_json(sheet.get('contradicted') or {})}\n"
-        "Valuation: NOT RELEASED\n"
-        f"Instruction: {instruction}\n"
+        + (
+            "Valuation: NOT RELEASED\n"
+            if not offer_amount
+            else (
+                f"Offer to present: {offer_amount} — this exact figure and no other. It is the only "
+                "number you have. There is no range, no ceiling and no 'best we can do' you are "
+                "holding back; if asked for more, say it is not your decision.\n"
+            )
+        )
+        + f"Instruction: {instruction}\n"
         f"Seller's first name: {seller_first_name or 'unknown'} (use it rarely, never every message)\n"
         f"Channel: {channel}; keep the message under {max_length} characters."
     )

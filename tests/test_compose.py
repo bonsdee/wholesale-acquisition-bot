@@ -3,6 +3,7 @@
 from sqlalchemy import select
 
 from acqbot.conversation.compose import MODEL_DIRECTIVES
+from acqbot.conversation.gate import MONEY_RE
 from acqbot.db import session_scope
 from acqbot.llm.client import ModelError
 from acqbot.llm.fake import ScriptedFakeClient
@@ -90,7 +91,9 @@ def test_model_escalation_discards_the_message_and_routes_to_a_human():
     console, seller_id, lead_id = open_thread(client)
     client.queue("generate", draft("", escalate=True, escalate_reason="minor_or_no_authority"))
     before = last_outbound(lead_id).msg_id
-    r = say(console, client, seller_id, "it's my nan's car but she said I can sell it for her")
+    # Deliberately a phrasing the regex screens do NOT catch, so the model's own flag is the only
+    # thing standing between this seller and a discovery question.
+    r = say(console, client, seller_id, "my parents bought it for me but I am the one using it")
     assert r.action == "escalated" and r.escalated == "model_flagged:minor_or_no_authority"
     assert last_outbound(lead_id).msg_id == before  # nothing went out
     with session_scope() as s:
@@ -99,24 +102,38 @@ def test_model_escalation_discards_the_message_and_routes_to_a_human():
         assert esc.reason == "model_flagged:minor_or_no_authority" and esc.details["directive"] == "clarify"
 
 
-def test_the_writer_never_holds_the_valuation_and_only_writes_discovery():
+def test_the_writer_writes_discovery_and_offers_and_nothing_else():
     assert MODEL_DIRECTIVES == {
         "ask_field",
         "clarify",
         "contradiction",
         "photos_partial",
         "verification_wait",
+        "offer",
+        "concession",
+        "offer_restate",
+        "at_ceiling",
     }
-    ctx = turn_context(
-        stage="DISCOVERY",
+
+
+def test_the_writer_is_given_one_figure_at_most_and_never_the_ladder():
+    kw = dict(
         outstanding=["service_history"],
         sheet={"confirmed": {"make": "Mazda"}, "claimed": {"odometer_km": 84500}, "contradicted": {}},
-        instruction="Ask for service history.",
         seller_first_name="Jo",
         channel="messenger",
         max_length=600,
     )
-    assert "NOT RELEASED" in ctx and "$" not in ctx and "ladder" not in ctx.lower()
+    before = turn_context(stage="DISCOVERY", instruction="Ask for service history.", **kw)
+    assert "NOT RELEASED" in before and "$" not in before and "ladder" not in before.lower()
+
+    # At PRICED it is handed the single amount it must present — and still not the ladder it sits on,
+    # because a writer that knows the ceiling is a writer that can hint at it.
+    presenting = turn_context(stage="OFFER_MADE", instruction="Present it.", offer_amount="$16,150", **kw)
+    assert "NOT RELEASED" not in presenting
+    assert MONEY_RE.findall(presenting) == ["16,150"]
+    assert "ladder" not in presenting.lower() and "ceiling" in presenting.lower()
+
     client = ScriptedFakeClient()
     console, seller_id, lead_id = open_thread(client)
     say(console, client, seller_id, "200,600")

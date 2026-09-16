@@ -27,10 +27,12 @@ log = logging.getLogger("acqbot.api")
 def create_app() -> FastAPI:
     from acqbot.api.admin import router as admin_router
     from acqbot.api.webhooks import router as webhooks_router
+    from acqbot.console.routes import router as console_router
 
     app = FastAPI(title="acqbot", version=__version__, docs_url="/docs")
     app.include_router(webhooks_router)
     app.include_router(admin_router)
+    app.include_router(console_router, include_in_schema=False)
 
     @app.get("/")
     def root() -> dict[str, Any]:
@@ -45,7 +47,8 @@ def create_app() -> FastAPI:
                 "lead_detail": "GET /leads/{lead_id}",
                 "messenger_webhook": "GET|POST /webhooks/messenger",
                 "sms_webhook": "POST /webhooks/sms",
-                "console": "GET /admin/escalations, GET /admin/handoffs (header: x-admin-token)",
+                "console": "GET /console (the screen)",
+                "admin_api": "GET /admin/escalations, GET /admin/handoffs (header: x-admin-token)",
             },
         }
 
