@@ -5,7 +5,7 @@ private-seller leads, conducts a structured discovery conversation, produces a b
 presents a firm offer within pre-authorised limits, and hands a complete deal packet to a human
 closer.
 
-**Status** All six phases complete · 234 tests · Not production ready — see
+**Status** All six phases complete · 245 tests · Not production ready — see
 [Before going live](#before-going-live)
 **Stack** Python 3.11+ · FastAPI · PostgreSQL · SQLAlchemy 2 · Alembic · Claude API
 **Jurisdiction** Victoria, Australia — LMCT-regulated activity
@@ -337,7 +337,9 @@ them, and never as a condition of anything. A seller who declines is still price
 offer; the question is simply not asked again.
 
 When the window does shut, a conversation with a number on file moves to SMS: a new thread on the
-same lead, the same conversation logic, nothing above the transport layer any the wiser. Only when
+same lead, the same conversation logic, nothing above the transport layer any the wiser. The first
+text names the dealership and its LMCT and offers `STOP`, because the Section 8 disclosure was in
+the first *Messenger* message and the Spam Act wants both on the first message of any channel. Only when
 there is genuinely nowhere to go — no number, or Twilio unconfigured — does it stop and ask a
 person. The console marks the switch in the transcript so a closer can see which messages were
 texts.
@@ -501,6 +503,10 @@ number for two-way SMS.
 **Configuration is still placeholder.** Dealership name, licence number, buyer identities, target
 margin by segment, transport cost, high-value escalation threshold and the human response SLA.
 
+**Nothing yet watches it.** `/health` reports seven checks and `acqbot doctor` runs them by hand,
+but no uptime monitor is pointed at either and `ACQBOT_SENTRY_DSN` is unset, so crashes go to the
+log and nowhere else. See `docs/DEPLOY.md`.
+
 **The prompts have not met a real seller.** Every model call is traced, the gate and the scripted
 fallback are exercised in tests, and the live smoke test passes against the API — but the wording
 has only been tested on scripted sellers. Run `acqbot chat --model anthropic` and read
@@ -547,6 +553,8 @@ See `.env.example` for the complete list.
 
 ## Documentation
 
+- `docs/DEPLOY.md` — putting it on a server: the two processes, the URLs to register, what to back
+  up, what to watch, how to roll back
 - `docs/DECISIONS.md` — every design decision with its rationale and the specification section it
   answers, including deliberate departures
 - `docs/PHASES.md` — what each build phase delivers

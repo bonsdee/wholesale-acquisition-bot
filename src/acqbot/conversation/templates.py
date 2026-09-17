@@ -191,6 +191,19 @@ def human_answer(identity: Identity) -> str:
     )
 
 
+def sms_first_contact(identity: Identity) -> str:
+    """Prefixed to the first SMS on a migrated thread.
+
+    Under the Spam Act 2003 a commercial electronic message must identify the sender and carry a
+    low-cost way to stop it. The Section 8 disclosure covers the FIRST Messenger message — but a
+    seller whose conversation moves to SMS otherwise gets a text from an unknown number with
+    neither. The identification and the opt-out have to travel with the channel change."""
+    return (
+        f"{identity.dealership} (LMCT {identity.lmct}) here, carrying on our chat from Marketplace. "
+        f"Reply STOP any time and I'll leave you alone.\n\n"
+    )
+
+
 def stop_ack() -> str:
     return "Understood — I won't message again."
 

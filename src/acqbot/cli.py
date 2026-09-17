@@ -325,6 +325,30 @@ def queue() -> None:
 
 
 @app.command()
+def doctor(
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show every check, not just failures.")
+    ] = False,
+) -> None:
+    """Check the things that fail quietly. Exit code 1 if anything is wrong."""
+    from acqbot.db import session_scope
+    from acqbot.observability import checks
+
+    with session_scope() as s:
+        report = checks(s)
+    for c in report.checks:
+        if c.ok and not verbose:
+            continue
+        mark = "ok  " if c.ok else ("DOWN" if c.fatal else "warn")
+        typer.echo(f"{mark}  {c.name:16s} {c.detail}")
+    if report.ok:
+        typer.echo(f"all {len(report.checks)} checks passed")
+    else:
+        typer.echo(f"\n{len(report.failures)} of {len(report.checks)} checks failed")
+        raise typer.Exit(1)
+
+
+@app.command()
 def review(
     model: Annotated[
         str | None,

@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     auto_present_offer: bool = False
     # Phase 6 — channel migration and nudges. The cadence is an open client decision (A.2 "stall
     # recovery cadence"), so these are defaults to be argued with, not findings.
+    # Observability (Section 11). All optional: without a DSN the system runs, just blind.
+    sentry_dsn: str = ""
+    environment: str = "development"
+    release: str = ""
     sms_migration: bool = True
     nudge_before_window_closes_hours: int = 20  # inside Messenger's 24h, while we may still send
     sms_nudge_hours: tuple[int, ...] = (24, 72)  # after the first, spaced for SMS courtesy norms

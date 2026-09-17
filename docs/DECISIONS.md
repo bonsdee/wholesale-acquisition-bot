@@ -135,6 +135,22 @@ Spec section numbers in brackets.
 | 86 | Archiving after a stall stays a human decision | The last unanswered nudge raises `stalled_no_reply` and leaves the lead in STALLED, which any reply reopens. Nothing auto-archives. | [A.2] "Re-engagement policy" is explicitly undecided, and the 90-day dedupe window means an archived lead cannot simply be re-approached. Inventing a policy here would bury a decision the client has not made. |
 | 87 | A seller is only chased when the ball is theirs | `WAITING_STATES` = CONTACTED, ENGAGED, DISCOVERY, OFFER_MADE, NEGOTIATING. VERIFICATION and PRICED are excluded. | Nudging someone while *we* are the ones running the PPSR check reads as incompetent, and HUMAN means a person already owns the conversation. |
 
+## Compliance (17 Sep 2026)
+
+| # | Decision | Detail | Why / spec reference |
+|---|---|---|---|
+| 88 | The sender identification travels with the channel change | The first SMS on a migrated thread is prefixed with `sms_first_contact`: dealership name, LMCT number, and "Reply STOP any time". Said once per thread, not stapled to every text. `STOP` added to the gate's allowed capitals. | Spam Act 2003 requires a commercial electronic message to identify its sender and carry a low-cost opt-out. [4.2] says Australian sender identification "is satisfied by the disclosure in Section 8" — but that disclosure is in the first MESSENGER message. A seller whose conversation migrates was getting a text from an unknown number with neither. Found by researching the go-live requirements, not by a test. |
+| 89 | A migrated message is re-gated against the channel that will carry it | After migration `_send` re-runs the gate with the SMS transport's `max_body_length` (1000, against Messenger's 2000) on the now-longer body. | The first gate pass ran against the wrong channel's limit and before the prefix existed. A 1,200-character message would have passed and then been silently truncated by Twilio mid-sentence. |
+
+## Observability (17 Sep 2026)
+
+| # | Decision | Detail | Why / spec reference |
+|---|---|---|---|
+| 90 | Crashes and quiet failures are two different problems | `observability.py` splits them: Sentry takes exceptions, and `checks()` asks the database seven questions that no exception would ever answer — is a worker running, is anyone working the queue, did an agreed deal go unclaimed, is the gate refusing everything, is the model still answering. | [4.1] names the dangerous failure mode as a system that "reports healthy while the pipeline is dead". A stopped worker raises nothing: the API keeps answering 200 and every seller is simply ignored. Error tracking alone cannot see that. |
+| 91 | `/health` returns 503 only when the service cannot work | A dead database fails the probe. A backlog, an unclaimed deal or a stopped worker report `ok: false` with a 200. | Taking the API out of a load balancer's rotation does not clear a queue or start a worker — it just removes the one surface that could tell somebody. The probe answers "can this serve", the body answers "is this well". |
+| 92 | The checks are tuned not to cry wolf | An empty database is healthy. The wording and model checks need at least four samples in the hour before a failure rate means anything. | A check that fires on a quiet Sunday gets muted within a week, and a muted check is worse than no check because it still looks like coverage. |
+| 93 | Sentry is optional and carries no seller's words | No DSN, no SDK import, no complaint — the system runs, it just runs blind. Where it is on, `send_default_pii` is off and events carry ids and counts only. | A conversation is a private individual's words about their own car and their own finances. Error tracking is not a reason to hand that to a third party. |
+
 ## Open — waiting on inputs
 
 - Target margin by segment and transport cost (config placeholders: 10%, $250).

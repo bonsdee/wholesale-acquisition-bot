@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from acqbot import __version__
 from acqbot.config import get_settings
@@ -28,7 +28,9 @@ def create_app() -> FastAPI:
     from acqbot.api.admin import router as admin_router
     from acqbot.api.webhooks import router as webhooks_router
     from acqbot.console.routes import router as console_router
+    from acqbot.observability import init_sentry
 
+    init_sentry()
     app = FastAPI(title="acqbot", version=__version__, docs_url="/docs")
     app.include_router(webhooks_router)
     app.include_router(admin_router)
@@ -53,10 +55,19 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/health")
-    def health() -> dict[str, Any]:
+    def health() -> JSONResponse:
+        """What an uptime monitor should watch.
+
+        200 while the service can do its job, 503 when it cannot. A backlog or an unclaimed deal is
+        reported but does not fail the probe — taking the API out of rotation would not help anyone
+        pick those up, and Section 4.1 names the dangerous failure as a system that "reports healthy
+        while the pipeline is dead", not one that admits a queue."""
+        from acqbot.observability import checks
+
         with session_scope() as s:
-            s.execute(text("select 1"))
-        return {"ok": True, "version": __version__}
+            report = checks(s)
+        body = {"version": __version__, **report.as_dict()}
+        return JSONResponse(body, status_code=200 if report.serving else 503)
 
     @app.post("/leads", status_code=201)
     async def post_lead(request: Request) -> JSONResponse:

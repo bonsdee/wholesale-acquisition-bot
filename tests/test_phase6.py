@@ -239,3 +239,53 @@ def test_states_where_the_ball_is_ours_are_never_nudged():
     assert LeadState.HUMAN not in WAITING_STATES
     for terminal in (LeadState.HANDOFF, LeadState.ARCHIVED, LeadState.REJECTED, LeadState.STALLED):
         assert terminal not in WAITING_STATES
+
+
+def test_the_first_sms_identifies_the_sender_and_offers_an_opt_out(monkeypatch):
+    # Spam Act 2003: a commercial electronic message must identify the sender and carry a low-cost
+    # way to stop it. The Section 8 disclosure is in the first MESSENGER message — a seller whose
+    # conversation migrates gets a text from an unknown number and has been told neither.
+    run = run_demo("clean", "accept", seed=42, human_presents=False, model="off")
+    sent = []
+
+    class _Sms:
+        channel = Channel.SMS
+        max_body_length = 1000
+
+        def send_window_open(self, thread):
+            return True
+
+        def send(self, thread, body):
+            from acqbot.transport.protocol import MessageReceipt
+
+            sent.append(body)
+            return MessageReceipt(external_msg_id=f"sms-{len(sent)}", sent_at=datetime.now(UTC))
+
+        def poll(self, since):
+            return []
+
+    monkeypatch.setattr("acqbot.transport.registry.get_transport", lambda ch: _Sms())
+    with session_scope() as s:
+        lead = s.get(Lead, run.lead_id)
+        lead.state = LeadState.DISCOVERY
+        conv = Conversation(s, _ShutWindow())
+        thread = s.scalars(select(Thread).where(Thread.lead_id == run.lead_id)).first()
+        conv._send(lead, thread, "Just checking in on the car.", "nudge_discovery")
+        conv._send(lead, thread, "And one more thing.", "nudge_discovery")
+
+    assert len(sent) == 2
+    first, second = sent
+    assert "LMCT" in first and "STOP" in first  # who it is, and how to make it stop
+    assert "Just checking in on the car." in first
+    # Said once, not stapled to every text.
+    assert "LMCT" not in second and "STOP" not in second
+
+
+def test_the_sms_preamble_passes_the_gate_and_fits_a_text():
+    from acqbot.conversation import templates as T
+
+    identity = T.Identity(agent="Alex", dealership="Placeholder Motors", lmct="00000")
+    body = T.sms_first_contact(identity) + "No rush — just checking in on the car."
+    r = validate(body, GateContext(stage=LeadState.DISCOVERY, max_length=1000))
+    assert r.ok, r.violations
+    assert len(body) < 320  # two SMS segments at most

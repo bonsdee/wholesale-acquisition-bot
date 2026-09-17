@@ -377,6 +377,15 @@ class Conversation:
             log.info("lead %s moved from %s to SMS", lead.lead_id, thread.channel.value)
         return transport, sms
 
+    def _has_outbound_on(self, thread: Thread) -> bool:
+        return bool(
+            self.s.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.thread_id == thread.thread_id, Message.direction == Direction.OUTBOUND)
+            )
+        )
+
     def _ever_asked(self, lead: Lead, field_key: str) -> bool:
         """Whether any outbound has already asked for this field. Used for the fields we ask once
         and then let go — pressing a seller twice for their phone number is how you lose them."""
@@ -520,6 +529,24 @@ class Conversation:
                 return None
             transport, thread = moved
             info = ThreadInfo(external_id=thread.external_id, last_inbound_at=thread.last_inbound_at)
+            # Spam Act 2003: a commercial message must say who sent it and how to stop it. The
+            # Section 8 disclosure covered the first MESSENGER message; a seller receiving their
+            # first text from an unknown number has been told neither.
+            if not self._has_outbound_on(thread):
+                body = T.sms_first_contact(self.identity(lead)) + body
+            # The message is now longer and on a channel with a shorter limit, so the gate runs
+            # again against the transport that will actually carry it.
+            ctx.max_length = transport.max_body_length
+            gate = validate(body, ctx)
+            if not gate.ok:
+                log.error("gate rejected %s after SMS migration: %s", template_id, gate.violations)
+                escalate(
+                    self.s,
+                    lead,
+                    "template_failed_gate",
+                    {"template": template_id, "violations": gate.violations, "channel": "sms"},
+                )
+                return None
         try:
             receipt = transport.send(info, body)
         except TransportError as exc:

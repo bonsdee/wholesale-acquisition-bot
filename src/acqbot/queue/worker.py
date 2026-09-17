@@ -58,12 +58,20 @@ def run_once(worker_id: str, kinds: list[str] | None = None) -> bool:
         with session_scope() as s:
             handler(s, payload)
     except Exception as exc:  # noqa: BLE001 - the queue is the error boundary
+        from acqbot.observability import capture_exception
+
         log.warning("job %s (%s, attempt %s) failed: %s", job_id, kind, attempts, exc)
+        capture_exception(exc, job_id=str(job_id), job_kind=kind, attempt=attempts, **_ids(payload))
         _finish(job_id, error="".join(traceback.format_exception(exc))[-4000:])
         return True
 
     _finish(job_id)
     return True
+
+
+def _ids(payload: dict) -> dict:
+    """The identifiers worth having on a crash report — never the seller's words."""
+    return {k: v for k, v in payload.items() if k.endswith("_id") and isinstance(v, str)}
 
 
 def _finish(job_id: uuid.UUID, error: str | None = None, dead: bool = False) -> None:
@@ -80,8 +88,12 @@ def _finish(job_id: uuid.UUID, error: str | None = None, dead: bool = False) -> 
 
 
 def run_forever(worker_id: str, poll_seconds: float = 1.0, kinds: list[str] | None = None) -> None:
+    from acqbot.observability import init_sentry, report_anomalies
+
+    init_sentry()
     log.info("worker %s started; handlers: %s", worker_id, registered_kinds())
     last_sweep = 0.0
+    last_health = time.monotonic()  # not on the first pass: let the process settle
     while True:
         if time.monotonic() - last_sweep > 60:
             with session_scope() as s:
@@ -89,6 +101,14 @@ def run_forever(worker_id: str, poll_seconds: float = 1.0, kinds: list[str] | No
                 if n:
                     log.warning("requeued %s stale jobs", n)
             last_sweep = time.monotonic()
+        # The quiet failures. Nothing raises when a lead sits unanswered, so somebody has to look.
+        if time.monotonic() - last_health > 900:
+            try:
+                with session_scope() as s:
+                    report_anomalies(s)
+            except Exception as exc:  # noqa: BLE001 - never let the check kill the worker
+                log.warning("health check failed: %s", exc)
+            last_health = time.monotonic()
         if not run_once(worker_id, kinds):
             time.sleep(poll_seconds)
 

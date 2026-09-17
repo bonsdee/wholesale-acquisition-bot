@@ -108,6 +108,7 @@ ALLOWED_CAPS = {
     "ACT",
     "NT",
     "REGO",
+    "STOP",  # the Spam Act opt-out keyword; shouting it is the convention, not a tone problem
     "VICROADS",
     "EOFY",
     "LPG",
