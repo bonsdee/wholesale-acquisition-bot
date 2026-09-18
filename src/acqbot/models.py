@@ -393,4 +393,48 @@ class ModelCall(Base):
     __table_args__ = (Index("ix_model_calls_lead_at", "lead_id", "at"),)
 
 
-IMMUTABLE_TABLES = ("messages", "state_log", "valuations", "market_data", "lead_duplicates", "model_calls")
+class AgentAssignment(Base):
+    """Which named buyer a lead was given to, decided once and never revisited.
+
+    Section 1 allows several named buyers under one identified dealership. Nothing stops a seller
+    comparing notes with a mate who sold the same week, so the name a seller sees must be stable
+    for the life of the conversation — the append-only trigger is what guarantees that, not our
+    care in never reassigning. The load-spreading decision happens once, here, at first contact.
+    """
+
+    __tablename__ = "agent_assignments"
+
+    # One row per lead: the primary key *is* the uniqueness rule.
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leads.lead_id"), primary_key=True
+    )
+    agent: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Whether every identity was already at its cap when this one was made. Not a failure — we
+    # never refuse a seller — but the number the dealership needs to see before hiring a name.
+    over_cap: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    assigned_at: Mapped[datetime] = _now()
+
+    __table_args__ = (Index("ix_agent_assignments_agent", "agent"),)
+
+
+IMMUTABLE_TABLES = (
+    "messages",
+    "state_log",
+    "valuations",
+    "market_data",
+    "lead_duplicates",
+    "model_calls",
+    "agent_assignments",
+)
+
+# A conversation nobody is waiting on any more. Used by the console to grey a row out, and by the
+# agent-assignment cap to decide whose hands are actually full.
+CLOSED_STATES = frozenset(
+    {
+        LeadState.HANDOFF,
+        LeadState.ACCEPTED,
+        LeadState.REJECTED,
+        LeadState.ARCHIVED,
+        LeadState.TERMINATED,
+    }
+)

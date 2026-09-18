@@ -422,6 +422,8 @@ def review(
             bits.append(f"{len(c.rejections)} gate rejection(s)")
         if c.fallbacks:
             bits.append(f"{len(c.fallbacks)} fallback(s)")
+        if c.quality:
+            bits.append(f"{len(c.quality)} reads badly")
         if c.needs_model and not real:
             bits.append("needs a real model")
         typer.echo(f"  {mark} {c.persona:14s} {c.final_state:11s} {'; '.join(bits)}")
@@ -438,9 +440,12 @@ def review(
     if result.aborted:
         typer.echo(f"\n{result.aborted}")
     clean = sum(1 for c in result.conversations if c.ok)
+    reads_badly = sum(len(c.quality) for c in result.conversations)
     typer.echo(
         f"\n{clean}/{len(result.conversations)} clean · {result.calls} calls · "
-        f"US${result.cost_aud:.2f}\n\n  → {out}"
+        f"US${result.cost_aud:.2f}"
+        + (f" · {reads_badly} thing(s) that read badly" if reads_badly else "")
+        + f"\n\n  → {out}"
     )
 
 

@@ -151,12 +151,37 @@ Spec section numbers in brackets.
 | 92 | The checks are tuned not to cry wolf | An empty database is healthy. The wording and model checks need at least four samples in the hour before a failure rate means anything. | A check that fires on a quiet Sunday gets muted within a week, and a muted check is worse than no check because it still looks like coverage. |
 | 93 | Sentry is optional and carries no seller's words | No DSN, no SDK import, no complaint — the system runs, it just runs blind. Where it is on, `send_default_pii` is off and events carry ids and counts only. | A conversation is a private individual's words about their own car and their own finances. Error tracking is not a reason to hand that to a third party. |
 
+## Concurrency per identity (18 Sep 2026)
+
+| # | Decision | Detail | Why / spec reference |
+|---|---|---|---|
+| 94 | The named buyer is decided once and stored, not recomputed | New `agent_assignments` table, one row per lead, append-only trigger like every other record. `agent_for()` looks it up before it decides anything. | The old version hashed the lead id on every message. That was stable, but only because it ignored everything else — the moment the choice depends on load, a recomputed choice starts changing underneath a seller mid-conversation. Storing it is what makes load-based assignment safe. |
+| 95 | Leads go to the least-loaded name, not a hash bucket | Load is open conversations per name, where open means the lead is not in `CLOSED_STATES`. Ties break on a per-lead rotation so equal names still split evenly. | [A.2] leaves concurrency per identity to the dealership. Nothing stopped a busy week landing entirely on one name, and a seller who mentions that their mate also dealt with "Alex" is a conversation nobody wants. Section 1 keeps multiple named buyers; it does not license implausible ones. |
+| 96 | The cap is soft, and the overflow is recorded | `ACQBOT_MAX_CONCURRENT_PER_AGENT` (default 12). When every name is full the lead still goes to the least-loaded one, with `over_cap` set on the row and a new `agent_load` check reporting it. | A seller who has just been asked for six photographs must not go unanswered because the dealership is understaffed. The cap's job is to spread load and then to say plainly that there is nowhere left to spread it — not to hold a queue. With one name configured it says so, rather than advising a dealership with one buyer to slow its intake. |
+| 97 | `CLOSED_STATES` moved to `models.py` | Was defined in the console. The console and the cap need the same answer to "is anyone still waiting on this". | Two copies of that set would drift, and the drift would show up as a queue screen and a load calculation disagreeing about the same lead. |
+
+## Legal review pack (18 Sep 2026)
+
+| # | Decision | Detail | Why / spec reference |
+|---|---|---|---|
+| 98 | Every sendable message extracted into one document for counsel | `scripts/legal_pack.js` → `legal-review-pack.docx`: all 18 fixed messages verbatim, the gate's prohibitions as prose, the three compliance changes already made, and four open questions. Regenerate after any change to `templates.py`. | [8] requires a disclosure review before go-live. Handing a lawyer a Python file is not a review, and the client cannot start theirs until the wording is in a form counsel can mark up. |
+| 99 | The pack names the gaps rather than only the messages | Raised for counsel: no APP 5 collection notice is sent anywhere, the consent basis for the first SMS is untested, whether named buyers must be real employees, and no retention period is set. | The disclosure wording was always going to be reviewed. The privacy notice is the one nobody asked for, which is exactly why it was still missing — the system asks for a VIN, runs a PPSR check and stores the conversation permanently without telling the seller any of that. |
+
+## Reading the conversation, not just auditing it (18 Sep 2026)
+
+| # | Decision | Detail | Why / spec reference |
+|---|---|---|---|
+| 100 | The review scores how a conversation READS, separately from whether it worked | New `review_quality.py`: four mechanical checks — repeated openers or sentences, more than one question in a message, a field asked a third time, and the model padding its questions more as the history grows. Reported in their own column and section, never mixed into `problems`. | Every existing expectation can pass while the conversation reads badly, and the gate cannot help: it refuses what is *prohibited*, not what is graceless. Opening four messages with "Thanks for that" breaks no rule. Without these, the one expensive real-model run produces sixteen transcripts to read by hand. |
+| 101 | Only model-written messages are judged | Scripted templates are excluded entirely. | The templates are fixed wording by design and a conversation is full of them; counting their repetition would bury the one line that mattered. They are reviewed once, by a person, in the legal pack. |
+| 102 | Drift is measured as inflation over the scripted wording, not raw length | Ratio of the model's message to the `FieldSpec.ask` it was handed, first third vs last third. | Measured raw, the check fired on all sixteen conversations: the fields are asked in a fixed order and their prompts differ in length, so raw length rises through every *healthy* conversation. A check that fires on everything is worse than no check, because the report stops being read. Recalibrating took the fake run from 29 findings to 3, all on the two personas built to be difficult. |
+| 103 | `panel_paint_condition` asked two questions; now asks one | Was "Panel and paint — excellent, good, fair, or poor? Any dents, scratches or bumper scuffs worth mentioning?" — found by check 100 on its first run, and the only one of the twelve fields with the problem. | [5.1] wants one question at a time. A seller on a phone answers whichever they read last, usually the damage, so the grade that drives the recon estimate never arrives — and the bot asking again reads as though it wasn't listening. This has been in the field spec since Phase 1. |
+
 ## Open — waiting on inputs
 
 - Target margin by segment and transport cost (config placeholders: 10%, $250).
 - Dealership name, LMCT number, named buyer identities.
-- Disclosure wording review [8, A.1]; process notes in `llm/knowledge.py` (inspection, payment, pick-up) to confirm.
+- Disclosure wording review [8, A.1] — pack prepared for counsel 18 Sep, entries 98-99; process notes in `llm/knowledge.py` (inspection, payment, pick-up) to confirm.
 - An Anthropic API key for the first real-model runs (`acqbot model-check`, `acqbot chat --model anthropic`).
 - Human SLA on escalation and handoff [A.1].
-- Stall / nudge cadence [A.2], re-engagement policy [A.2], concurrency per identity [A.2].
+- Stall / nudge cadence [A.2] and re-engagement policy [A.2]. (Concurrency per identity: built 18 Sep, entries 94-97 — the *number* is still the dealership's to set.)
 - Recon from photographs vs verbal-until-inspection [A.2] — default verbal until inspection.

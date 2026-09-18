@@ -43,6 +43,7 @@ from acqbot.db import session_scope
 from acqbot.facts.fields import DISCOVERY_REQUIRED
 from acqbot.facts.store import fact_sheet
 from acqbot.models import (
+    CLOSED_STATES,
     Escalation,
     HandoffPacket,
     LadderStep,
@@ -58,14 +59,9 @@ from acqbot.valuation.service import latest_valuation
 router = APIRouter(prefix="/console", tags=["console"])
 
 # States where the conversation is over: saying "bot still talking" about these is a lie, and the
-# person reading the queue is deciding what to pick up on that basis.
-CLOSED_STATES = {
-    LeadState.HANDOFF,
-    LeadState.ACCEPTED,
-    LeadState.REJECTED,
-    LeadState.ARCHIVED,
-    LeadState.TERMINATED,
-}
+# person reading the queue is deciding what to pick up on that basis. Defined in models.py, because
+# the agent-assignment cap needs the same answer to "whose hands are actually full" and two copies
+# of that set would drift apart.
 
 COOKIE = "acqbot_console"
 _COOKIE_SALT = b"acqbot-console-v1"

@@ -78,7 +78,10 @@ DISCOVERY_REQUIRED: tuple[FieldSpec, ...] = (
         why="Direct reconditioning cost line",
         kind="enum",
         choices=("excellent", "good", "fair", "poor"),
-        ask="Panel and paint — excellent, good, fair, or poor? Any dents, scratches or bumper scuffs worth mentioning?",
+        # One question, not two. Asked as two, a seller on a phone answers whichever they read last
+        # — usually the damage — and the grade that actually drives the recon estimate never
+        # arrives, so the bot has to ask again and reads as though it wasn't listening.
+        ask="How's the panel and paint — excellent, good, fair, or poor? Mention any dents or scratches while you're there.",
     ),
     FieldSpec(
         key="mechanical_faults",

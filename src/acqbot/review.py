@@ -30,6 +30,8 @@ from acqbot.ingestion.service import ingest_lead
 from acqbot.models import Escalation, HandoffPacket, LadderStep, Lead, Message, ModelCall, Offer
 from acqbot.personas import ALL, Persona
 from acqbot.queue.worker import drain
+from acqbot.review_quality import Finding
+from acqbot.review_quality import findings as quality_findings
 from acqbot.simulator import make_lead
 from acqbot.transport.registry import reset_console_transport
 
@@ -59,6 +61,7 @@ class Turn:
     generator: str | None = None
     model_version: str | None = None
     attachments: int = 0
+    asked_field: str | None = None
 
 
 @dataclass
@@ -85,6 +88,9 @@ class ConversationReview:
     templates_used: set[str] = field(default_factory=set)
     rejections: list[Rejection] = field(default_factory=list)
     fallbacks: list[str] = field(default_factory=list)  # templates that fell back to the script
+    # How the conversation READS, as against whether it worked — see review_quality.py. Kept apart
+    # from `problems` because these do not mean the run failed: they mean a person should look.
+    quality: list[Finding] = field(default_factory=list)
     model_errors: list[str] = field(default_factory=list)
     offers: list[dict[str, Any]] = field(default_factory=list)
     calls: int = 0
@@ -299,6 +305,7 @@ def _collect(review: ConversationReview, persona: Persona) -> None:
                     generator=notes.get("generator"),
                     model_version=m.model_version,
                     attachments=len(m.attachments or []),
+                    asked_field=notes.get("asked_field"),
                 )
             )
             if m.direction.value != "outbound":
@@ -387,6 +394,9 @@ def _collect(review: ConversationReview, persona: Persona) -> None:
             f"took {review.questions_asked} questions, expected at most {persona.expect_max_questions} "
             "— a multi-field answer was probably not absorbed"
         )
+
+    # --- and how it reads
+    review.quality = quality_findings(review.turns)
     return None
 
 
@@ -459,14 +469,14 @@ def render_markdown(review: Review) -> str:
     if review.aborted:
         out.append(f"> **Run did not finish.** {review.aborted}")
         out.append("")
-    out.append("| Seller | Ended | Questions | Problems | Gate rejections | Fallbacks | Cost |")
-    out.append("|---|---|---|---|---|---|---|")
+    out.append("| Seller | Ended | Questions | Problems | Reads badly | Gate rejections | Fallbacks | Cost |")
+    out.append("|---|---|---|---|---|---|---|---|")
     for c in review.conversations:
         flag = "✅" if c.ok else ("➖" if c.needs_model and not is_real else "⚠️")
         name = c.persona + (" ¹" if c.needs_model else "")
         out.append(
             f"| {flag} {name} | {c.final_state} | {c.questions_asked} | {len(c.problems)} | "
-            f"{len(c.rejections)} | {len(c.fallbacks)} | ${c.cost_aud:.3f} |"
+            f"{len(c.quality) or '—'} | {len(c.rejections)} | {len(c.fallbacks)} | ${c.cost_aud:.3f} |"
         )
     out.append("")
     if any(c.needs_model for c in review.conversations):
@@ -500,6 +510,25 @@ def render_markdown(review: Review) -> str:
             out.append(f"**{c.persona}** — {c.why}")
             for p in c.problems:
                 out.append(f"- {p}")
+            out.append("")
+
+    quality = [c for c in review.conversations if c.quality]
+    if quality:
+        out.append("## Conversations that worked but read badly")
+        out.append("")
+        out.append(
+            "Nothing here broke a rule — the gate passed every one of these and the machinery did "
+            "its job. They are the things a seller would notice and a checklist would not: the same "
+            "opener three times, two questions in one message, a field asked for a third time. Only "
+            "messages the model wrote are considered; the scripted wording is fixed by design."
+        )
+        out.append("")
+        for c in quality:
+            out.append(f"**{c.persona}** — {c.why}")
+            for f in c.quality:
+                out.append(f"- *{f.check}* — {f.detail}")
+                if f.quote:
+                    out.append(f"  > {f.quote.strip()[:300]}")
             out.append("")
 
     fallbacks = [c for c in review.conversations if c.fallbacks or c.model_errors]

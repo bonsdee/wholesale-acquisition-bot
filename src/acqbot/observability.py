@@ -209,6 +209,28 @@ def checks(session: Session, settings: Settings | None = None) -> Report:
         )
     )
 
+    # --- is any named buyer holding more than a person could
+    from acqbot.conversation.service import agent_load
+
+    cap = cfg.max_concurrent_per_agent
+    if cap > 0:
+        load = agent_load(session, cfg)
+        full = {n: c for n, c in load.items() if c >= cap}
+        # Every name full is the real signal: the cap stops spreading the moment there is nowhere
+        # to spread to, and from then on sellers are being handed to someone already at capacity.
+        everyone = bool(load) and len(full) == len(load)
+        out.append(
+            Check(
+                "agent_load",
+                not everyone,
+                f"every named buyer is at the {cap}-conversation cap ({', '.join(f'{n}:{c}' for n, c in sorted(load.items()))})"
+                + (" — only one name is configured" if len(load) == 1 else " — add another name or slow the intake")
+                if everyone
+                else f"busiest identity holds {max(load.values(), default=0)} of {cap}",
+                max(load.values(), default=0),
+            )
+        )
+
     # --- are we still able to speak
     since = now - timedelta(hours=1)
     recent = list(

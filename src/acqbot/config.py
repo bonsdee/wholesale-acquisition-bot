@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     dealership_name: str = "Placeholder Motors"
     dealership_lmct: str = "00000"  # number only; templates add the "LMCT" prefix
     agent_names: list[str] = Field(default_factory=lambda: ["Alex"])
+    # How many live conversations one named buyer may be holding before new leads prefer another
+    # name. A soft cap: a seller is never made to wait for a free slot, but `acqbot doctor` says
+    # so when every name is full. 0 disables the spreading entirely.
+    max_concurrent_per_agent: int = 12
 
     # Providers
     vin_provider: str = "stub"

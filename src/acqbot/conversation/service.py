@@ -54,6 +54,8 @@ from acqbot.ingestion.service import request_reenrichment
 from acqbot.llm.client import ModelClient
 from acqbot.llm.registry import get_model_client
 from acqbot.models import (
+    CLOSED_STATES,
+    AgentAssignment,
     Channel,
     Direction,
     Escalation,
@@ -112,10 +114,60 @@ class HandleResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
-def agent_for(lead: Lead, settings: Settings) -> str:
+def _preference_order(lead: Lead, names: list[str]) -> list[str]:
+    """A per-lead rotation of the names, so that equally-loaded identities still get an even split
+    rather than everything falling to whichever name sorts first."""
+    start = int(hashlib.sha256(str(lead.lead_id).encode()).hexdigest(), 16) % len(names)
+    return names[start:] + names[:start]
+
+
+def agent_load(session: Session, settings: Settings) -> dict[str, int]:
+    """Open conversations per named buyer. Names with none still appear, at zero."""
     names = settings.agent_names or ["Alex"]
-    idx = int(hashlib.sha256(str(lead.lead_id).encode()).hexdigest(), 16) % len(names)
-    return names[idx]
+    counts = dict.fromkeys(names, 0)
+    rows = session.execute(
+        select(AgentAssignment.agent, func.count())
+        .join(Lead, Lead.lead_id == AgentAssignment.lead_id)
+        .where(Lead.state.not_in(CLOSED_STATES))
+        .group_by(AgentAssignment.agent)
+    ).all()
+    for agent, n in rows:
+        counts[agent] = counts.get(agent, 0) + int(n)  # a retired name still shows its open work
+    return counts
+
+
+def agent_for(session: Session, lead: Lead, settings: Settings) -> str:
+    """The named buyer this seller deals with — looked up if it exists, decided once if it does not.
+
+    The cap is deliberately SOFT. A seller is never held back because the roster is full: when
+    every identity is at its limit the lead still goes to the least-loaded name, and the row is
+    marked so `acqbot doctor` can say the thing that is actually true — the dealership needs
+    another named buyer, or fewer leads.
+    """
+    existing = session.get(AgentAssignment, lead.lead_id)
+    if existing is not None:
+        return existing.agent
+
+    names = settings.agent_names or ["Alex"]
+    load = agent_load(session, settings)
+    order = _preference_order(lead, names)
+    cap = settings.max_concurrent_per_agent
+
+    under = [n for n in order if load.get(n, 0) < cap] if cap > 0 else list(order)
+    over_cap = not under
+    pool = under or order
+    agent = min(pool, key=lambda n: (load.get(n, 0), pool.index(n)))
+
+    session.add(AgentAssignment(lead_id=lead.lead_id, agent=agent, over_cap=over_cap))
+    session.flush()  # so a second identity() call this turn finds the row rather than re-deciding
+    if over_cap:
+        log.warning(
+            "every named buyer is at the %d-conversation cap; %s takes lead %s anyway",
+            cap,
+            agent,
+            lead.lead_id,
+        )
+    return agent
 
 
 class Conversation:
@@ -432,7 +484,7 @@ class Conversation:
         return T.Identity(
             dealership=self.cfg.dealership_name,
             lmct=self.cfg.dealership_lmct,
-            agent=agent_for(lead, self.cfg),
+            agent=agent_for(self.s, lead, self.cfg),
         )
 
     # ------------------------------------------------------------------ outbound

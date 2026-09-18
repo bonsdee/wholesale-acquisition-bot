@@ -5,7 +5,7 @@ private-seller leads, conducts a structured discovery conversation, produces a b
 presents a firm offer within pre-authorised limits, and hands a complete deal packet to a human
 closer.
 
-**Status** All six phases complete · 245 tests · Not production ready — see
+**Status** All six phases complete · 270 tests · Not production ready — see
 [Before going live](#before-going-live)
 **Stack** Python 3.11+ · FastAPI · PostgreSQL · SQLAlchemy 2 · Alembic · Claude API
 **Jurisdiction** Victoria, Australia — LMCT-regulated activity
