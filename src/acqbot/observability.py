@@ -273,6 +273,28 @@ def checks(session: Session, settings: Settings | None = None) -> Report:
             )
         )
 
+    # --- is anything a seller sees built on made-up data
+    from acqbot.enrichment.providers import KIND_LABEL, done_by_a_person, on_test_data
+
+    stubs, manual = on_test_data(cfg), done_by_a_person(cfg)
+    by_hand = f"; done by a person: {', '.join(KIND_LABEL[k] for k in manual)}" if manual else ""
+    if stubs:
+        # In production the API and the worker refuse to start on stub data, so this failing there
+        # means something started without the guard. In development it is the normal state.
+        out.append(
+            Check(
+                "test_data",
+                not cfg.is_production,
+                f"made-up test data for: {', '.join(KIND_LABEL[k] for k in stubs)}"
+                + (" — refused in production" if cfg.is_production else " (fine for development)")
+                + by_hand,
+                stubs,
+                fatal=cfg.is_production,
+            )
+        )
+    else:
+        out.append(Check("test_data", True, "no test data" + by_hand, []))
+
     return Report(out)
 
 

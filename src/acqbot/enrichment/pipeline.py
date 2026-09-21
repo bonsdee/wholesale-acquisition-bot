@@ -11,6 +11,10 @@ nothing goes out until that answer exists. A written-off or stolen result termin
 
 When the listing carries neither VIN nor rego, PPSR is simply deferred: the state machine lists
 `rego` as the first outstanding DISCOVERY field and enrichment re-runs once it is known.
+
+A provider set to "manual" is None here and its step is skipped: a person does it in the console
+(`record_checks` for the PPSR and rego, a figure typed in for the price). Nothing is recorded on
+their behalf, so the facts those steps would verify stay unverified until the person has looked.
 """
 
 from __future__ import annotations
@@ -87,8 +91,22 @@ def enrich_lead(session: Session, lead_id: uuid.UUID, providers: Providers | Non
     vin: str | None = sheet.get("vin")
     rego: str | None = sheet.get("rego")
 
+    manual = [
+        kind
+        for kind, provider in (
+            ("rego", providers.rego),
+            ("vin", providers.vin),
+            ("ppsr", providers.ppsr),
+            ("guide", providers.guide),
+            ("comps", providers.comps),
+        )
+        if provider is None
+    ]
+    if manual:
+        summary["manual"] = manual
+
     # --- rego lookup (soft) ---
-    if rego:
+    if rego and providers.rego is not None:
         try:
             r = providers.rego.lookup(rego, state, hint=hint)
             note(
@@ -113,7 +131,7 @@ def enrich_lead(session: Session, lead_id: uuid.UUID, providers: Providers | Non
             errors.append({"step": "rego", "error": str(exc), "retryable": exc.retryable})
 
     # --- VIN decode (soft) ---
-    if vin:
+    if vin and providers.vin is not None:
         try:
             d = providers.vin.decode(vin, hint=hint)
             for key, val in (
@@ -132,7 +150,7 @@ def enrich_lead(session: Session, lead_id: uuid.UUID, providers: Providers | Non
             errors.append({"step": "vin", "error": str(exc), "retryable": exc.retryable})
 
     # --- PPSR (hard gate) ---
-    if vin:
+    if vin and providers.ppsr is not None:
         try:
             p = providers.ppsr.check(vin)
         except ProviderError as exc:
@@ -182,22 +200,28 @@ def enrich_lead(session: Session, lead_id: uuid.UUID, providers: Providers | Non
     h = _hint(
         fact_sheet(session, lead_id).get, payload
     )  # re-read: VIN decode may have corrected variant/year
-    try:
-        g = providers.guide.lookup(h.make, h.model, h.variant, h.year, h.odometer_km)
-        session.add(
-            MarketData(lead_id=lead_id, provider=g.provider, kind=MarketDataKind.GUIDE, payload=_jsonable(g))
-        )
-        summary["guide"] = [g.trade_low, g.trade_high]
-    except ProviderError as exc:
-        errors.append({"step": "guide", "error": str(exc), "retryable": exc.retryable})
-    try:
-        c = providers.comps.search(h.make, h.model, h.variant, h.year, h.odometer_km)
-        session.add(
-            MarketData(lead_id=lead_id, provider=c.provider, kind=MarketDataKind.COMPS, payload=_jsonable(c))
-        )
-        summary["comps"] = len(c.comps)
-    except ProviderError as exc:
-        errors.append({"step": "comps", "error": str(exc), "retryable": exc.retryable})
+    if providers.guide is not None:
+        try:
+            g = providers.guide.lookup(h.make, h.model, h.variant, h.year, h.odometer_km)
+            session.add(
+                MarketData(
+                    lead_id=lead_id, provider=g.provider, kind=MarketDataKind.GUIDE, payload=_jsonable(g)
+                )
+            )
+            summary["guide"] = [g.trade_low, g.trade_high]
+        except ProviderError as exc:
+            errors.append({"step": "guide", "error": str(exc), "retryable": exc.retryable})
+    if providers.comps is not None:
+        try:
+            c = providers.comps.search(h.make, h.model, h.variant, h.year, h.odometer_km)
+            session.add(
+                MarketData(
+                    lead_id=lead_id, provider=c.provider, kind=MarketDataKind.COMPS, payload=_jsonable(c)
+                )
+            )
+            summary["comps"] = len(c.comps)
+        except ProviderError as exc:
+            errors.append({"step": "comps", "error": str(exc), "retryable": exc.retryable})
 
     lead.enriched_at = datetime.now(UTC)
     lead.enrichment_errors = errors or None
@@ -216,7 +240,7 @@ def enrich_lead(session: Session, lead_id: uuid.UUID, providers: Providers | Non
 
     summary["contradictions"] = contradictions
     summary["errors"] = errors
-    summary["ppsr_pending"] = vin is None
+    summary["ppsr_pending"] = vin is None or providers.ppsr is None
     if lead.state == LeadState.NEW:
         enqueue(session, "maybe_send_opening", {"lead_id": str(lead_id)}, dedupe_key=f"opening:{lead_id}")
     return summary

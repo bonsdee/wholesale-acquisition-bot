@@ -135,8 +135,10 @@ class AuctionComps(Protocol):
 
 @dataclass
 class Providers:
-    vin: VinDecoder
-    ppsr: PpsrChecker
-    rego: RegoLookup
-    guide: GuideValuation
-    comps: AuctionComps
+    """None means a person does that step in the console (provider setting "manual")."""
+
+    vin: VinDecoder | None
+    ppsr: PpsrChecker | None
+    rego: RegoLookup | None
+    guide: GuideValuation | None
+    comps: AuctionComps | None

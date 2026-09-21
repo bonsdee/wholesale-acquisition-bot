@@ -5,7 +5,7 @@ private-seller leads, conducts a structured discovery conversation, produces a b
 presents a firm offer within pre-authorised limits, and hands a complete deal packet to a human
 closer.
 
-**Status** All six phases complete · 283 tests · Not production ready — see
+**Status** All six phases complete · 316 tests · Not production ready — see
 [Before going live](#before-going-live)
 **Stack** Python 3.11+ · FastAPI · PostgreSQL · SQLAlchemy 2 · Alembic · Claude API
 **Jurisdiction** Victoria, Australia — LMCT-regulated activity
@@ -235,7 +235,13 @@ uv run python -c "from acqbot.config import get_settings as g; u=g().database_ur
 Every external provider has a deterministic stub, so the whole pipeline runs offline against your
 database alone.
 
+Your `.env` is the live system (production, Supabase, a person doing checks and prices), and the
+commands that invent sellers — `demo`, `chat`, `review`, `simulate-lead --ingest/--post` — refuse
+to run against it: every table is append-only, so made-up sellers would stay in the real audit trail
+for good. Point one PowerShell window at the local test database first:
+
 ```powershell
+. .\scripts\local-test.ps1           # this window only: local test DB, development, stub data
 uv run acqbot demo --auto-offer      # scripted seller, full pipeline, prints the transcript
 uv run acqbot chat                   # you play the seller
 ```
@@ -279,12 +285,13 @@ uv run acqbot serve          # then open http://127.0.0.1:8000/console
 ```
 
 Sign in with `ACQBOT_ADMIN_TOKEN`. Server-rendered HTML: no template engine, no npm, no second
-system to host. Four pages:
+system to host. Five pages:
 
 | Page | What it is for |
 |---|---|
 | `/console` | Everything waiting on a person, oldest first, each with what happened and what to do about it. Rows carry whether the automation has stopped, the conversation has closed, or the bot is still talking. |
-| `/console/leads/{id}` | One lead: the open task with its action, the ladder, offers, what is verified vs the seller's word, the transcript, and forms to resolve, present, record an outcome or record a fact. |
+| `/console/leads/new` | Add a lead from a Marketplace listing. Builds the same Figure 2 payload the webhook takes and runs it through the same intake; the lead page then shows the Page link and a message for the salesperson to send the seller. |
+| `/console/leads/{id}` | One lead: the open task with its action, the ladder (or, with manual pricing, an amount box), offers, what is verified vs the seller's word, the transcript, and forms to resolve, present, record an outcome, record the PPSR check or record a fact. |
 | `/console/handoffs` | Agreed deals awaiting a closer, with the Figure 5 packet in prose. Claim puts your name on it. |
 | `/console/threads` | Conversations that could not be matched to a lead, with a form to link one. |
 
@@ -424,6 +431,8 @@ tests/
 
 The suite drops and recreates the schema on the database it is pointed at, and refuses to run
 unless the database name contains `test`. Use a separate database — never one holding real leads.
+It never reads your `.env` either, so a real API key or production settings there cannot reach a
+test.
 
 ```powershell
 $env:ACQBOT_TEST_DATABASE_URL = "postgresql+pg8000://<user>:<password>@<host>:5432/postgres_test?sslmode=require"
@@ -485,7 +494,9 @@ This system is not ready to contact a real seller. In order of lead time:
 **The valuation engine has never seen a real price.** Trade guide, auction comparables, PPSR, VIN
 decode and registration lookup are all deterministic stubs. The arithmetic is correct and tested;
 the inputs are invented. Commercial agreements with a guide provider and an auction data source are
-the longest lead items on the project.
+the longest lead items on the project. Until they exist, run with every provider set to `manual`:
+a person records the PPSR certificate and types every price in the console, and production refuses
+to start on stubs at all (Section 12: "humans occupying the not-yet-built stages").
 
 **The calibration gate has not been passed.** The engine must be run against at least two hundred
 historical transactions with known purchase price and actual reconditioning spend, and tuned until
@@ -527,7 +538,7 @@ from someone qualified to give it.
 | `ACQBOT_DATABASE_URL` | PostgreSQL connection | local |
 | `ACQBOT_LEAD_WEBHOOK_SECRET` | Shared secret for inbound lead signatures | — |
 | `ACQBOT_ADMIN_TOKEN` | Enables and guards `/admin`; unset disables it | unset |
-| `ACQBOT_DEALERSHIP_NAME` · `_LMCT` · `_AGENT_NAMES` | Identity used in every message | placeholder |
+| `ACQBOT_DEALERSHIP_NAME` · `_LMCT` · `_AGENT_NAMES` | Identity used in every message. The names are real salespeople: the assistant works *with* one, never speaks *as* one | Direct Auto · 0013130 · Vikram, Peter, Simon, Robin |
 | `ACQBOT_TARGET_MARGIN_PCT` · `_BY_SEGMENT` | Target margin | 0.10 |
 | `ACQBOT_TRANSPORT_COST_AUD` | Per-vehicle transport | 250 |
 | `ACQBOT_LADDER_OPENING` · `_STEP_1` · `_STEP_2` | Ladder multipliers | 0.88 · 0.93 · 0.97 |
@@ -539,9 +550,9 @@ from someone qualified to give it.
 | `ACQBOT_NUDGE_BEFORE_WINDOW_CLOSES_HOURS` | First nudge, inside the 24h window | 20 |
 | `ACQBOT_SMS_NUDGE_HOURS` | Spacing of the later nudges, in hours | [24, 72] |
 | `ACQBOT_MAX_NUDGES` | Nudges before the lead stalls | 3 |
-| `ACQBOT_MIN_PHOTOS` | Photographs required to exit discovery | 6 |
+| `ACQBOT_MIN_PHOTOS` | Photographs required to exit discovery (front, back, both sides, dash) | 5 |
 | `ACQBOT_HUMAN_SLA_HOURS` | Escalation and handoff response target | 4 |
-| `ACQBOT_*_PROVIDER` | Enrichment provider selection | stub |
+| `ACQBOT_*_PROVIDER` | `stub` (made-up, refused in production) · `manual` (a person does it in the console) · a real provider | stub |
 | `ACQBOT_ANTHROPIC_API_KEY` | Enables the language model | unset |
 | `ACQBOT_LLM_PROVIDER` | `auto` · `anthropic` · `fake` · `off` | auto |
 | `ACQBOT_EXTRACTION_MODEL` · `_CONVERSATION_MODEL` | Which model reads, which model writes | Haiku 4.5 · Sonnet 5 |

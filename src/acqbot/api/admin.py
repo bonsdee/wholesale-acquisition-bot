@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import hmac
 import uuid
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, date, datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from acqbot.config import get_settings
+from acqbot.conversation.checks import ChecksError, ManualChecks
+from acqbot.conversation.checks import record_checks as _record_checks
 from acqbot.conversation.handoff import transcript
 from acqbot.conversation.service import Conversation
 from acqbot.conversation.transitions import transition
@@ -214,12 +216,49 @@ def add_fact(lead_id: uuid.UUID, body: ManualFact) -> dict[str, Any]:
         }
 
 
+class RecordChecks(BaseModel):
+    """What a PPSR search certificate says, recorded by the person who ran the search."""
+
+    finance_owing: bool
+    amount_owing_aud: float | None = None
+    written_off: Literal["no", "repairable", "statutory"]
+    stolen: bool
+    rego_status: Literal["current", "expired", "unregistered"]
+    rego_expiry: date | None = None
+    year: int
+    vin: str | None = Field(default=None, max_length=17)
+    odometer_km: int | None = None
+    certificate: str | None = Field(default=None, max_length=64)
+    by: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/leads/{lead_id}/checks", dependencies=[Admin])
+def record_checks(lead_id: uuid.UUID, body: RecordChecks) -> dict[str, Any]:
+    with session_scope() as s:
+        lead = s.get(Lead, lead_id)
+        if lead is None:
+            raise HTTPException(404, "lead not found")
+        fields = body.model_dump(exclude={"by"})
+        try:
+            out = _record_checks(s, lead, ManualChecks(**fields), by=body.by)
+        except ChecksError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "result": out.result,
+            "reason": out.reason,
+            "recorded": out.recorded,
+            "state": lead.state.value,
+        }
+
+
 @router.post("/leads/{lead_id}/value", dependencies=[Admin])
 def revalue(lead_id: uuid.UUID) -> dict[str, Any]:
     with session_scope() as s:
         if s.get(Lead, lead_id) is None:
             raise HTTPException(404, "lead not found")
         out = compute_valuation(s, lead_id)
+        if out.result is None:
+            return {"basis": out.basis.value, "pricing": "manual", "ladder": {}}
         return {
             "basis": out.basis.value,
             "wholesale_max": out.result.wholesale_max,

@@ -158,15 +158,25 @@ def build_packet(
             "written_off": bool(ppsr_wo.get("written_off")),
             "checked_at": ppsr_fo.get("checked_at"),
         },
-        "valuation": {
-            "band": [float(valuation.band_low), float(valuation.band_high)],
-            "wholesale_max": float(valuation.wholesale_max),
-            "recon_estimate": float(valuation.recon_estimate),
-            "recon_lines": valuation.recon_lines,
-            "comps": (comps_row.payload.get("comps") if comps_row else []),
-            "computed_at": valuation.computed_at.isoformat(),
-            "engine_version": valuation.engine_version,
-        },
+        # A person priced it: there is no band, no recon estimate and no comps to report, and zeros
+        # in their place would read to the closer as a valuation that came out at nothing.
+        "valuation": (
+            {
+                "priced_by": "a person (no price data connected)",
+                "computed_at": valuation.computed_at.isoformat(),
+                "engine_version": valuation.engine_version,
+            }
+            if valuation.engine_version == "manual"
+            else {
+                "band": [float(valuation.band_low), float(valuation.band_high)],
+                "wholesale_max": float(valuation.wholesale_max),
+                "recon_estimate": float(valuation.recon_estimate),
+                "recon_lines": valuation.recon_lines,
+                "comps": (comps_row.payload.get("comps") if comps_row else []),
+                "computed_at": valuation.computed_at.isoformat(),
+                "engine_version": valuation.engine_version,
+            }
+        ),
         "agreed_price_aud": float(accepted_offer.amount),
         "ladder_steps_used": len(offers),
         "offer_expires_at": accepted_offer.expires_at.isoformat(),

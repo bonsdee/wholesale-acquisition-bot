@@ -73,7 +73,7 @@ from acqbot.models import (
 )
 from acqbot.queue.jobs import enqueue
 from acqbot.transport.protocol import InboundMessage, ThreadInfo, Transport, TransportError
-from acqbot.valuation.service import latest_valuation
+from acqbot.valuation.service import is_manual, latest_valuation
 
 log = logging.getLogger("acqbot.conversation")
 
@@ -114,6 +114,12 @@ class HandleResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+# Verification facts a person supplies when the provider that would verify them is "manual":
+# field → the provider kind whose check produces it. The PPSR search certificate carries the
+# registration details too, so one search answers all three.
+PERSON_CHECKS = {"finance_owing": "ppsr", "write_off_status": "ppsr", "rego_status": "rego"}
+
+
 def _preference_order(lead: Lead, names: list[str]) -> list[str]:
     """A per-lead rotation of the names, so that equally-loaded identities still get an even split
     rather than everything falling to whichever name sorts first."""
@@ -123,7 +129,7 @@ def _preference_order(lead: Lead, names: list[str]) -> list[str]:
 
 def agent_load(session: Session, settings: Settings) -> dict[str, int]:
     """Open conversations per named buyer. Names with none still appear, at zero."""
-    names = settings.agent_names or ["Alex"]
+    names = settings.agent_names
     counts = dict.fromkeys(names, 0)
     rows = session.execute(
         select(AgentAssignment.agent, func.count())
@@ -148,7 +154,7 @@ def agent_for(session: Session, lead: Lead, settings: Settings) -> str:
     if existing is not None:
         return existing.agent
 
-    names = settings.agent_names or ["Alex"]
+    names = settings.agent_names
     load = agent_load(session, settings)
     order = _preference_order(lead, names)
     cap = settings.max_concurrent_per_agent
@@ -1134,12 +1140,35 @@ class Conversation:
         )
 
     def _after_stage(self, lead: Lead, view: StageView) -> None:
-        if view.stage == LeadState.VERIFICATION and not view.verification_outstanding:
+        if view.stage != LeadState.VERIFICATION:
+            return
+        if not view.verification_outstanding:
             enqueue(
                 self.s,
                 "value_lead",
                 {"lead_id": str(lead.lead_id), "then": "on_priced"},
                 dedupe_key=f"value:{lead.lead_id}",
+            )
+            return
+        # Checks no provider will run, because a person does them ("manual"). Without this task the
+        # lead would sit in VERIFICATION for ever: the seller has been told a number is coming, and
+        # nothing in the system is going to produce the facts that let it be priced.
+        from acqbot.enrichment.providers import done_by_a_person
+
+        manual = set(done_by_a_person(self.cfg))
+        waiting = [f for f in view.verification_outstanding if PERSON_CHECKS.get(f) in manual]
+        if waiting:
+            sheet = fact_sheet(self.s, lead.lead_id)
+            create_task(
+                self.s,
+                lead,
+                "checks_needed",
+                {
+                    "outstanding": waiting,
+                    "rego": sheet.get("rego"),
+                    "vin": sheet.get("vin"),
+                    "state": (lead.upstream_payload or {}).get("location", {}).get("state"),
+                },
             )
 
     # ------------------------------------------------------------------ offers
@@ -1154,7 +1183,10 @@ class Conversation:
                 action="not_priced", lead_id=lead.lead_id, stage=view.stage.value, details=view.as_dict()
             )
         transition(self.s, lead, LeadState.PRICED, "valuation_released")
-        if self.cfg.auto_present_offer:
+        # A person prices every car while no price data is connected; automation has no figure to
+        # present, whatever ACQBOT_AUTO_PRESENT_OFFER says.
+        manual = is_manual(latest_valuation(self.s, lead.lead_id, basis=ValuationBasis.VERIFIED))
+        if self.cfg.auto_present_offer and not manual:
             # Second line of defence behind the valuation's own `not_viable` escalation: a lead a
             # person handed back to the bot must not come round again to "$0, subject to
             # inspection". Automation never presents below the minimum; a person still can.
@@ -1187,15 +1219,27 @@ class Conversation:
                 stage=LeadState.PRICED,
             )
         val = latest_valuation(self.s, lead.lead_id, basis=ValuationBasis.VERIFIED)
-        create_task(
-            self.s,
-            lead,
-            "offer_presentation",
-            {
-                "ladder": val.ladder if val else None,
-                "band": [float(val.band_low), float(val.band_high)] if val else None,
-            },
-        )
+        if manual:
+            create_task(
+                self.s,
+                lead,
+                "price_needed",
+                {
+                    "asking_price_aud": sheet.get("asking_price_aud"),
+                    "finance_owing": sheet.get("finance_owing"),
+                    "contradicted": sorted(sheet.contradicted),
+                },
+            )
+        else:
+            create_task(
+                self.s,
+                lead,
+                "offer_presentation",
+                {
+                    "ladder": val.ladder if val else None,
+                    "band": [float(val.band_low), float(val.band_high)] if val else None,
+                },
+            )
         return HandleResult(
             action="awaiting_human_offer",
             lead_id=lead.lead_id,
@@ -1210,6 +1254,8 @@ class Conversation:
         val = latest_valuation(self.s, lead.lead_id, basis=ValuationBasis.VERIFIED)
         if val is None:
             raise ValueError("no verified valuation to present from")
+        if is_manual(val):
+            raise ValueError("Pricing is manual — there is no ladder to present from. Type the amount in.")
         if step == LadderStep.FLOOR and not presented_by.startswith("human"):
             raise ValueError("floor is not reachable by automation")
         if step == LadderStep.HUMAN:
@@ -1344,6 +1390,7 @@ class Conversation:
             Escalation.reason.in_(
                 [
                     "offer_presentation",
+                    "price_needed",
                     "offer_response_needed",
                     "offer_expired",
                     # Presenting the ceiling IS the answer to the request to present the ceiling.
@@ -1442,7 +1489,8 @@ class Conversation:
         if "counter" in ex.intents or "reject" in ex.intents:
             counter = None if quotes_ours else ex.counter_price
             transition(self.s, lead, LeadState.NEGOTIATING, "seller_countered", {"counter": counter})
-            if not self.cfg.auto_present_offer:
+            # A manual price has no authorised steps above it, so a counter always goes to a person.
+            if not self.cfg.auto_present_offer or is_manual(val):
                 escalate(
                     self.s,
                     lead,
@@ -1533,10 +1581,16 @@ class Conversation:
     def record_human_offer(
         self, lead: Lead, amount: float, *, presented_by: str, valuation: Valuation | None = None
     ) -> Offer:
-        """An above-ladder amount decided by a human. Sent as a concession message."""
+        """An amount decided by a person: above the ladder, or any figure at all when pricing is
+        manual. The first figure a seller hears goes out as the offer itself — "Here's where we've
+        landed … firm offer … open until" — and later ones as a concession. It used to be a
+        concession every time, so a person pricing the first offer sent "I can go to $X — same
+        terms" to a seller who had never been told any terms."""
         val = valuation or latest_valuation(self.s, lead.lead_id, basis=ValuationBasis.VERIFIED)
         if val is None:
             raise ValueError("no verified valuation")
+        if amount <= 0:
+            raise ValueError("The amount has to be more than $0.")
         prev = self.current_offer(lead)
         if prev is not None and prev.outcome is None:
             prev.outcome, prev.outcome_at = OfferOutcome.SUPERSEDED, datetime.now(UTC)
@@ -1561,11 +1615,23 @@ class Conversation:
         )
         thread = self.thread_for_lead(lead)
         if thread is not None:
+            first = prev is None
+            body = (
+                T.offer(
+                    amount,
+                    expires,
+                    fact_sheet(self.s, lead.lead_id).get,
+                    self.identity(lead),
+                    self.cfg.timezone,
+                )
+                if first
+                else T.concession(amount, expires, self.cfg.timezone)
+            )
             self._send(
                 lead,
                 thread,
-                T.concession(amount, expires, self.cfg.timezone),
-                "concession",
+                body,
+                "offer" if first else "concession",
                 stage=LeadState.OFFER_MADE,
                 ladder=val.ladder,
                 current_offer=amount,

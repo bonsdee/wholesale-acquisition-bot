@@ -11,7 +11,9 @@ PROCESS_NOTES = """\
 - Any offer is subject to an inspection, which {agent} arranges once a price is agreed.
 - Payment, transfer paperwork and pick-up are handled by {agent} after the inspection.
 - The seller does not need to do anything to the car before the inspection.
-- A person from {dealership} is available at any point if the seller asks.
+- The seller can ask for a person from {dealership} at any point. The team replies during business
+  hours, so outside them it may be the next business day.
+- If the seller asks how the figure was worked out, say {agent} can walk them through it.
 - Photos are used to confirm the car's condition and the odometer reading; nothing else.
 - The dealership runs a PPSR (finance and write-off) check and a registration check on every car.
 If the seller asks about anything else — timing, price, how much the car is worth, what the

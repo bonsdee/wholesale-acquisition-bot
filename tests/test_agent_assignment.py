@@ -127,7 +127,7 @@ def test_a_finished_conversation_gives_the_slot_back(session, settings_env):
 
 
 def test_a_full_roster_still_takes_the_seller(session, settings_env):
-    # The cap is a preference, not a queue. A seller who has just been asked for six photos must
+    # The cap is a preference, not a queue. A seller who has just been asked for five photos must
     # not go unanswered because the dealership is understaffed — that is the failure the whole
     # system exists to prevent.
     settings_env(agent_names='["Alex"]', max_concurrent_per_agent=1)

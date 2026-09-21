@@ -48,7 +48,7 @@ class Signals:
     offers_presented: int = 0
     inbound_after_last_offer: int = 0
     acknowledged_contradictions: set[str] = field(default_factory=set)
-    min_photos: int = 6
+    min_photos: int = 5
 
 
 @dataclass

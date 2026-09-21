@@ -91,7 +91,10 @@ def test_happy_path_with_the_model_in_the_loop():
     _discipline(run)
 
 
-def test_model_mode_matches_template_mode_turn_for_turn():
+def test_model_mode_matches_template_mode_turn_for_turn(settings_env):
+    # The two runs are two leads, and each lead gets its own salesperson from the roster — a real
+    # difference that has nothing to do with who wrote the words. One name makes the comparison fair.
+    settings_env(agent_names='["Vikram"]')
     scripted = run_demo("clean", "accept", seed=42, human_presents=False, model="off")
     modelled = run_demo("clean", "accept", seed=42, human_presents=False, model="fake")
     assert scripted.final_state == modelled.final_state == "HANDOFF"

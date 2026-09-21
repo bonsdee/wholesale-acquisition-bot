@@ -89,7 +89,12 @@ def test_generation_asks_the_field_and_passes_the_gate(client, cfg):
             {"role": "user", "content": "Hi, saw you're keen on my car"},
             {
                 "role": "assistant",
-                "content": "Hi Mei, Alex here. What's the exact odometer reading right now, in km?",
+                "content": (
+                    "Hi Mei, this is the automated assistant for Placeholder Motors (LMCT 00000). I'm "
+                    "working with Alex from our team, and you can ask for a person at any point.\n\n"
+                    "We're interested in your 2015 Mitsubishi Outlander. What's the exact odometer "
+                    "reading right now, in km?"
+                ),
             },
             {"role": "user", "content": "It's on 200,600 km right now"},
         ],

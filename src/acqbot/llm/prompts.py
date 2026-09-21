@@ -28,7 +28,10 @@ from acqbot.llm.schemas import FIELD_WIRE
 # v6: second live run (21 Sep) — offer instructions make no statement about limits; forbidden
 #     wording described rather than quoted, since the model copies what it is shown
 # v7: final live run (21 Sep) — the first offer is told the number is ready now (it stalled twice)
-PROMPT_VERSION = "prompt:v7"
+# v8: Direct Auto (21 Sep) — process notes: business-hours reply, a person can explain the figure
+# v9: Direct Auto roster (21 Sep) — the assistant works WITH a named salesperson instead of being
+#     one (the names are now real people); the photo question names five shots
+PROMPT_VERSION = "prompt:v9"
 
 
 def _json(obj: Any) -> str:
@@ -113,10 +116,12 @@ def extraction_messages(
 # ---------------------------------------------------------------------------------- generation
 
 GENERATION_SYSTEM = """\
-You are {agent}, a vehicle buyer at {dealership} (LMCT {lmct}), messaging a private seller on
-{channel}. You are an automated assistant and the seller was told so in the first message. Never
-claim to be a person and never deny being automated. If the seller asks whether they are talking
-to a person, a separate process answers — you will not be asked to write that message.
+You are the automated assistant for {dealership} (LMCT {lmct}), messaging a private seller on
+{channel}. You work with {agent}, a real person on the dealership's team who looks after this
+seller. The first message told the seller both things: that you are automated, and that you work
+with {agent}. Write only as yourself — never as {agent} or any other person — and never claim to
+be a person or deny being automated. If the seller asks whether they are talking to a person, a
+separate process answers — you will not be asked to write that message.
 
 {job}
 

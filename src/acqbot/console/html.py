@@ -16,6 +16,25 @@ from typing import Any
 # The raw reason is a system word; a sales floor needs the sentence.
 REASONS: dict[str, tuple[str, str]] = {
     "verification_review": ("Confirm the odometer", "Read it off the dash photo and record it."),
+    "checks_needed": (
+        "Run the PPSR check",
+        "Search the rego or VIN on ppsr.gov.au and record the certificate below — finance, write-off, "
+        "stolen and rego. The seller has been told a firm number is coming.",
+    ),
+    "price_needed": (
+        "Set the price",
+        "The checks are done. Type the figure below — it goes to the seller as a firm offer, subject to "
+        "inspection, open for 48 hours, and is recorded against your name.",
+    ),
+    "ppsr_written_off": (
+        "PPSR: written off",
+        "Don't make an offer. Let the seller know, politely, that we can't buy it.",
+    ),
+    "ppsr_stolen": (
+        "PPSR: reported stolen",
+        "Don't continue the conversation about the car. Follow the dealership's procedure for a "
+        "vehicle reported stolen.",
+    ),
     "offer_presentation": ("Ready to price", "The valuation is done. Present an offer."),
     "offer_response_needed": ("Seller countered", "Decide the reply — concede, hold, or hand back."),
     "handoff": ("Deal agreed", "Book the inspection and confirm the details."),
@@ -176,16 +195,43 @@ label { color:var(--soft); font-size:14px; display:inline-flex; gap:6px; align-i
 .ladder div.ceiling b { color:var(--dim); }
 .warnbox { border:1px solid var(--warn); color:var(--warn); padding:10px 14px; margin-bottom:12px; background:#1a1710; }
 .login { max-width:380px; margin:16vh auto; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px 14px; }
+.grid label { display:flex; flex-direction:column; align-items:stretch; gap:4px; font-size:13px; }
+.grid label.wide { grid-column:1/-1; }
+textarea { width:100%; min-height:70px; }
+.copy { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; white-space:pre-wrap; user-select:all;
+        border:1px dashed var(--line); padding:10px 12px; margin:8px 0; }
+.errors { border:1px solid var(--bad); color:var(--bad); padding:10px 14px; margin-bottom:12px; background:#1a1413; }
+.errors li { margin-left:18px; }
 footer { color:var(--dim); font-size:13px; padding:28px 24px; max-width:1100px; margin:0 auto; border-top:1px solid var(--line); }
 """
 
 
-def page(title: str, body: str, *, nav: bool = True, flash: tuple[str, str] | None = None) -> str:
+ENGINE_FOOTER = (
+    "Every figure here comes from the valuation engine. Offers above the ceiling are a human decision "
+    "and are recorded as one."
+)
+MANUAL_FOOTER = (
+    "Pricing is manual: no price data is connected, so every figure a seller sees was typed in by a "
+    "person and is recorded against their name."
+)
+
+
+def page(
+    title: str,
+    body: str,
+    *,
+    nav: bool = True,
+    flash: tuple[str, str] | None = None,
+    banner: str | None = None,
+    footer: str = ENGINE_FOOTER,
+) -> str:
     bar = ""
     if nav:
         bar = (
             "<header><h1>Acquisition console</h1>"
-            '<nav><a href="/console">Queue</a><a href="/console/handoffs">Handoffs</a>'
+            '<nav><a href="/console">Queue</a><a href="/console/leads/new">Add lead</a>'
+            '<a href="/console/handoffs">Handoffs</a>'
             '<a href="/console/threads">Unlinked</a></nav><span class="spacer"></span>'
             '<form class="inline" method="post" action="/console/logout">'
             '<button class="ghost" type="submit">Sign out</button></form></header>'
@@ -194,14 +240,14 @@ def page(title: str, body: str, *, nav: bool = True, flash: tuple[str, str] | No
     if flash:
         kind, text = flash
         note = f'<div class="flash{" bad" if kind == "bad" else ""}">{esc(text)}</div>'
+    warn = f'<div class="warnbox">{esc(banner)}</div>' if banner else ""
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<meta name='robots' content='noindex'>"
         f"<title>{esc(title)}</title><style>{STYLE}</style></head><body>"
-        f"{bar}<main>{note}{body}</main>"
-        "<footer>Every figure here comes from the valuation engine. Offers above the ceiling are a "
-        "human decision and are recorded as one.</footer></body></html>"
+        f"{bar}<main>{warn}{note}{body}</main>"
+        f"<footer>{esc(footer)}</footer></body></html>"
     )
 
 

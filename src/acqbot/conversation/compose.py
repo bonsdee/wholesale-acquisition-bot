@@ -20,7 +20,7 @@ from acqbot.config import Settings
 from acqbot.conversation import templates as T
 from acqbot.conversation.gate import GateContext, validate
 from acqbot.conversation.history import build_history
-from acqbot.facts.fields import FieldSpec, spec_for
+from acqbot.facts.fields import FieldSpec, photos_needed, spec_for
 from acqbot.facts.store import FactSheet
 from acqbot.llm.client import ModelClient, ModelRequest
 from acqbot.llm.prompts import PROMPT_VERSION, gate_feedback, generation_system, turn_context
@@ -151,9 +151,8 @@ def contradiction_instruction(field_key: str, claimed: Any, actual: Any, source:
 
 def photos_partial_instruction(have: int, need: int) -> str:
     return (
-        f"They sent {have} photo{'s' if have != 1 else ''}; {need} are needed in total — the six exterior "
-        f"angles, the interior, and the dash with the ignition on so the odometer shows. Thank them briefly "
-        f"and ask for the rest."
+        f"They sent {have} photo{'s' if have != 1 else ''}. The dealership needs {photos_needed(need)}. "
+        "Thank them briefly and ask for the rest."
     )
 
 
@@ -197,7 +196,7 @@ def _verbatim(amount: str, expiry: str) -> str:
     2:46pm Wednesday 23 September" — keeping our "exactly", dropping the "on" — and the gate
     rightly refused it. Quoted, the boundary is unambiguous."""
     return (
-        f'Copy these two phrases into the message exactly as written, character for character, '
+        f"Copy these two phrases into the message exactly as written, character for character, "
         f'without the quotation marks: "{amount}" and "{expiry}". '
     )
 

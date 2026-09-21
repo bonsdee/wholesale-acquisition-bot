@@ -26,6 +26,13 @@ from acqbot.queue.worker import job_handler
 from acqbot.valuation import engine
 from acqbot.valuation.engine import CompInput, EngineConfig, MarketInputs, VehicleInputs
 
+# A valuation a person prices. No price data is connected, so the engine has nothing to compute
+# from — and a number it invented would be the exact failure the spec's sequencing note warns of:
+# "a miscalibrated valuation engine does not fail visibly". The row still records the basis, so the
+# release rule (every gating fact verified) holds exactly as it does for an engine valuation; it
+# just carries no ladder, and nothing automated can present from it.
+MANUAL_ENGINE_VERSION = "manual"
+
 RELEASE_REQUIRES_VERIFIED = (
     "year",
     "odometer_km",
@@ -39,9 +46,13 @@ RELEASE_REQUIRES_VERIFIED = (
 @dataclass
 class ValuationOutcome:
     row: Valuation
-    result: engine.ValuationResult
+    result: engine.ValuationResult | None  # None when a person prices (MANUAL_ENGINE_VERSION)
     basis: ValuationBasis
     escalated: str | None = None
+
+
+def is_manual(valuation: Valuation | None) -> bool:
+    return valuation is not None and valuation.engine_version == MANUAL_ENGINE_VERSION
 
 
 def engine_config_from_settings() -> EngineConfig:
@@ -144,11 +155,39 @@ def determine_basis(sheet: FactSheet) -> ValuationBasis:
     return ValuationBasis.VERIFIED
 
 
+def _manual_valuation(session: Session, lead: Lead, sheet: FactSheet, *, persist: bool) -> ValuationOutcome:
+    basis = determine_basis(sheet)
+    row = Valuation(
+        lead_id=lead.lead_id,
+        basis=basis,
+        engine_version=MANUAL_ENGINE_VERSION,
+        band_low=0,
+        band_high=0,
+        wholesale_max=0,
+        ladder={},
+        recon_estimate=0,
+        recon_lines=[],
+        inputs_snapshot={
+            "pricing": "manual",
+            "fact_ids": {k: str(fv.fact_id) for k, fv in sheet.facts.items()},
+            "contradicted": sheet.contradicted,
+        },
+    )
+    if persist:
+        session.add(row)
+        session.flush()
+    return ValuationOutcome(row=row, result=None, basis=basis)
+
+
 def compute_valuation(session: Session, lead_id: uuid.UUID, *, persist: bool = True) -> ValuationOutcome:
+    from acqbot.enrichment.providers import pricing_is_manual
+
     lead = session.get(Lead, lead_id)
     if lead is None:
         raise ValueError(f"lead {lead_id} not found")
     sheet = fact_sheet(session, lead_id)
+    if pricing_is_manual(get_settings()):
+        return _manual_valuation(session, lead, sheet, persist=persist)
     v = vehicle_inputs_from_sheet(sheet)
     m = market_inputs_from_rows(
         _latest_market(session, lead_id, MarketDataKind.GUIDE),
@@ -249,6 +288,6 @@ def _handle_value_lead(session: Session, payload: dict[str, Any]) -> None:
             "missing_verified": missing_for_release(sheet),
             "claimed": {k: sheet.get(k) for k in missing_for_release(sheet)},
             "photos": sheet.get("photos"),
-            "indicative_wholesale_max": out.result.wholesale_max,
+            "indicative_wholesale_max": out.result.wholesale_max if out.result else None,
         },
     )

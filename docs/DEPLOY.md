@@ -58,6 +58,7 @@ say which version broke.
 | `ACQBOT_AUTO_PRESENT_OFFER` | `false` — a person presents every offer | `true` once you have read a few dozen transcripts and trust the wording |
 | `ACQBOT_LLM_PROVIDER` | `anthropic` | `off` runs scripted templates only, which is a genuine fallback if the API is down |
 | `ACQBOT_ALLOW_UNSIGNED_LEADS` | **never `true` in production** | — |
+| `ACQBOT_*_PROVIDER` (vin, ppsr, rego, guide, comps) | `manual` — a person records the PPSR certificate and types every price | each real provider as its contract lands. `stub` is refused: with `ACQBOT_ENVIRONMENT=production` the API and the worker will not start on it |
 | `ACQBOT_SMS_MIGRATION` | `true` | `false` if Twilio is not set up yet |
 
 ## URLs to register

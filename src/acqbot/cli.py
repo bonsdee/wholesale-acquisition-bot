@@ -15,6 +15,24 @@ app = typer.Typer(no_args_is_help=True, help="Wholesale vehicle acquisition chat
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
 
 
+def _refuse_in_production(what: str) -> None:
+    """Commands that invent sellers must not run against the real database.
+
+    Every table is append-only, so a demo run against production leaves its made-up sellers, offers
+    and deal packets in the audit trail for good. ACQBOT_ENVIRONMENT=production is what says "this is
+    the real one"; `scripts/local-test.ps1` points a session at the local throwaway database."""
+    from acqbot.config import get_settings
+
+    if get_settings().is_production:
+        typer.echo(
+            f"refusing to {what}: ACQBOT_ENVIRONMENT is production, and made-up sellers written to the "
+            "real database stay there for good (every table is append-only). Point this session at the "
+            "local test database first — in PowerShell: . .\\scripts\\local-test.ps1",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+
 @app.command()
 def migrate(revision: str = "head") -> None:
     """Apply database migrations (alembic upgrade)."""
@@ -42,9 +60,15 @@ def worker(
     """Run the job worker (enrichment, and later sends, nudges, expiries)."""
     import acqbot.queue.handlers  # noqa: F401
     from acqbot.config import get_settings
+    from acqbot.enrichment.providers import UnsafeConfiguration, assert_no_test_data
     from acqbot.queue.worker import drain, run_forever
 
     s = get_settings()
+    try:
+        assert_no_test_data(s)  # the worker is what talks to sellers; it must not start on stubs
+    except UnsafeConfiguration as exc:
+        typer.echo(f"refusing to start: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     if once:
         n = drain(s.worker_id)
         typer.echo(f"processed {n} job(s)")
@@ -71,6 +95,9 @@ def simulate_lead(
 ) -> None:
     """Generate Figure 2 lead payloads. Prints JSON unless --ingest or --post is given."""
     from acqbot.simulator import make_leads
+
+    if ingest or post:
+        _refuse_in_production("load made-up leads")
 
     leads = make_leads(count, seed=seed, scenario=scenario)
 
@@ -129,6 +156,9 @@ def value(lead_id: str, persist: bool = True) -> None:
     with session_scope() as s:
         out = compute_valuation(s, uuid.UUID(lead_id), persist=persist)
         r = out.result
+        if r is None:
+            typer.echo(json.dumps({"basis": out.basis.value, "pricing": "manual"}, indent=2))
+            return
         typer.echo(
             json.dumps(
                 {
@@ -210,6 +240,8 @@ def demo(
     import acqbot.queue.handlers  # noqa: F401
     from acqbot.demo import run_demo
 
+    _refuse_in_production("run a demo seller")
+
     if model == "anthropic":
         from acqbot.config import get_settings
         from acqbot.llm.registry import missing_key_reason
@@ -238,6 +270,8 @@ def chat(
     import os
 
     import acqbot.queue.handlers  # noqa: F401
+
+    _refuse_in_production("start a practice conversation")
 
     if model is not None:
         os.environ["ACQBOT_LLM_PROVIDER"] = model
@@ -378,6 +412,7 @@ def review(
     if model is not None:
         os.environ["ACQBOT_LLM_PROVIDER"] = model
     reset_settings_cache()
+    _refuse_in_production("run the review sellers")
     cfg = get_settings()
     reason = missing_key_reason(cfg)
     if reason:

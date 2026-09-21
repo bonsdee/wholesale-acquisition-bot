@@ -28,8 +28,10 @@ def create_app() -> FastAPI:
     from acqbot.api.admin import router as admin_router
     from acqbot.api.webhooks import router as webhooks_router
     from acqbot.console.routes import router as console_router
+    from acqbot.enrichment.providers import assert_no_test_data
     from acqbot.observability import init_sentry
 
+    assert_no_test_data()  # production on stub data does not start at all
     init_sentry()
     app = FastAPI(title="acqbot", version=__version__, docs_url="/docs")
     app.include_router(webhooks_router)

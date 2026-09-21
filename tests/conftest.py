@@ -15,6 +15,10 @@ from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+# Never read the developer's .env: it may hold a real API key and production settings. Must be set
+# before acqbot.config is imported, which decides the .env question once, at import.
+os.environ["ACQBOT_DOTENV"] = "0"
+
 TEST_DB_URL = os.environ.get(
     "ACQBOT_TEST_DATABASE_URL", "postgresql+pg8000://postgres:postgres@127.0.0.1:5432/acqbot_test"
 )

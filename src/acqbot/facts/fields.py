@@ -14,6 +14,22 @@ from dataclasses import dataclass, field
 LISTING_CONFIDENCE = 0.6
 STATED_CONFIDENCE = 0.9
 
+# The photographs asked for, worded once, here. Five, to match the "at least 5 photos" on the
+# dealership's own sell form (client, 21 Sep) — a seller who has been through the site has already
+# taken them. Chosen for what they verify: the four sides are the panel-and-paint grade, and the
+# dash with the ignition on is the odometer reading and any warning lights. The spec's interior and
+# corner shots [5.1] were dropped because no priced field reads them. "Both sides" is two photos.
+PHOTO_SHOTS = "the front, the back, both sides, and the dash with the ignition on so the odometer shows"
+PHOTO_SHOTS_COUNT = 5
+
+
+def photos_needed(need: int) -> str:
+    """'5 in total: the front, …' — the count and the list, kept in agreement. At any other
+    ACQBOT_MIN_PHOTOS the list becomes a guide, so the message never counts five things as eight."""
+    if need == PHOTO_SHOTS_COUNT:
+        return f"{need} in total: {PHOTO_SHOTS}"
+    return f"{need} in total, ideally including {PHOTO_SHOTS}"
+
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -118,14 +134,12 @@ DISCOVERY_REQUIRED: tuple[FieldSpec, ...] = (
     FieldSpec(
         key="photos",
         label="Photographs",
-        why="Six exterior angles, interior, dash — verifies claims",
+        why="Front, back, both sides and the dash — verifies the panel-and-paint grade and the odometer",
         kind="list",
         verified_sources=("photo",),
-        ask=(
-            "Last thing — can you send photos: the six exterior angles (front, back, both sides, both front "
-            "corners), the interior, and the dash with the ignition on so the odometer shows?"
-        ),
-        extra={"min_photos": 6},
+        # No count in the question: the list carries it, and a number here would contradict
+        # ACQBOT_MIN_PHOTOS the day someone changes it. The chase-up (photos_needed) states one.
+        ask=f"Last thing — can you send photos of {PHOTO_SHOTS}?",
     ),
 )
 

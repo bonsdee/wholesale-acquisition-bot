@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from acqbot.facts.fields import FieldSpec, spec_for
+from acqbot.facts.fields import FieldSpec, photos_needed, spec_for
 
 TEMPLATE_VERSION = "template:v1"
 
@@ -47,9 +47,21 @@ def fmt_expiry(expires_at: datetime, tz: str) -> str:
 
 
 def disclosure(identity: Identity) -> str:
+    """Who is speaking, in the first breath: the assistant, the licensed dealership it belongs to,
+    and the real person it works with.
+
+    It used to open "{agent} here from {dealership}" and disclose the automation a sentence later.
+    That was tolerable while the name was a placeholder; once the names became Direct Auto's own
+    salespeople (21 Sep) it had the bot speaking as a real employee, and a seller could fairly read
+    the opening as Vikram typing. The seller still learns the name of the person they will deal
+    with at inspection — that continuity is the point of a named buyer [8].
+
+    It also used to say "a person from our team is available any time" — untrue for a business open
+    Mon–Sat business hours, whose own site promises a call "within one business day". What IS true
+    at every hour is that the seller can ask, and the bot hands over."""
     return (
-        f"Quick note before we start: this is an automated assistant from {identity.dealership} "
-        f"(LMCT {identity.lmct}). A person from our team is available any time — just ask."
+        f"this is the automated assistant for {identity.dealership} (LMCT {identity.lmct}). "
+        f"I'm working with {identity.agent} from our team, and you can ask for a person at any point."
     )
 
 
@@ -60,7 +72,27 @@ def opening(
     vehicle = _vehicle(sheet_get)
     if not sheet_get("variant") and len(variants) >= 2:
         first_ask = f"Is it the {variants[0]} or the {variants[1]}?"
-    return f"Hi {first}, {identity.agent} here from {identity.dealership}. {disclosure(identity)}\n\nWe're interested in your {vehicle}. {first_ask}"
+    return f"Hi {first}, {disclosure(identity)}\n\nWe're interested in your {vehicle}. {first_ask}"
+
+
+def marketplace_link(page_username: str, lead_id: object) -> str:
+    """The m.me link that opens a conversation with the Page and carries the lead id [4.2]."""
+    return f"https://m.me/{page_username}?ref={lead_id}"
+
+
+def marketplace_invite(
+    *, dealership: str, lmct: str, agent: str | None, seller_name: str, vehicle: str, link: str
+) -> str:
+    """What a salesperson sends a Marketplace seller, from their own account, to bring them to the
+    Page. Suggested, not sent: Marketplace has no messaging API [4.2], so this first touch is a
+    person's. It names the salesperson the assistant will say it works with, and says up front that
+    an automated assistant takes it from there."""
+    first = (seller_name or "").split(" ")[0] or "there"
+    who = f"{agent} from {dealership}" if agent else dealership
+    return (
+        f"Hi {first}, {who} here (licensed dealer, LMCT {lmct}). We'd like to make you an offer on "
+        f"your {vehicle}. Our automated assistant can take the details — tap here to start: {link}"
+    )
 
 
 def ask_field(spec: FieldSpec, *, preface: str = "") -> str:
@@ -109,7 +141,9 @@ def contradiction(field_key: str, claimed: Any, actual: Any, source: str) -> str
 
 
 def photos_partial(have: int, need: int) -> str:
-    return f"Got {have} — could you send the rest? I need {need} in total: the six exterior angles, the interior, and the dash with the ignition on."
+    # Used to say "I need 6 in total: the six exterior angles, the interior, and the dash" — eight
+    # shots counted as six. The count and the list now come from one place.
+    return f"Got {have} — could you send the rest? I need {photos_needed(need)}."
 
 
 def verification_wait(identity: Identity) -> str:

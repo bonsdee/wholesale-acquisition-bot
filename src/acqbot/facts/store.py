@@ -57,6 +57,12 @@ def materially_different(field_key: str, old: Any, new: Any) -> bool:
     if field_key in {"finance_owing", "write_off_status"} and isinstance(old, dict) and isinstance(new, dict):
         key = "owing" if field_key == "finance_owing" else "written_off"
         return bool(old.get(key)) != bool(new.get(key))
+    # Registration matters by whether it is current, not by the day it expires: a seller who says
+    # "until March" and a certificate that says 31 March agree. Found when a person first recorded
+    # a PPSR certificate after the seller had already answered (21 Sep) — the console called it a
+    # contradiction because the dates differed by a month's end and the record carried who checked.
+    if field_key == "rego_status" and isinstance(old, dict) and isinstance(new, dict):
+        return (old.get("status") or "").lower() != (new.get("status") or "").lower()
     return not values_equal(old, new)
 
 

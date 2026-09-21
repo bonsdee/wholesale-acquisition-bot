@@ -16,19 +16,23 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from acqbot.api import admin
 from acqbot.config import get_settings
 from acqbot.console.html import (
+    ENGINE_FOOTER,
     LADDER_LABEL,
     LADDER_ORDER,
+    MANUAL_FOOTER,
     ago,
     esc,
     fact_value,
@@ -38,12 +42,17 @@ from acqbot.console.html import (
     page,
     reason_text,
 )
+from acqbot.contracts import LeadContractError
+from acqbot.conversation import templates as T
 from acqbot.conversation.handoff import _render_fact, transcript
 from acqbot.db import session_scope
+from acqbot.enrichment.providers import KIND_LABEL, done_by_a_person, on_test_data, pricing_is_manual
 from acqbot.facts.fields import DISCOVERY_REQUIRED
 from acqbot.facts.store import fact_sheet
+from acqbot.ingestion.service import ingest_lead
 from acqbot.models import (
     CLOSED_STATES,
+    AgentAssignment,
     Escalation,
     HandoffPacket,
     LadderStep,
@@ -54,7 +63,7 @@ from acqbot.models import (
     Offer,
     Thread,
 )
-from acqbot.valuation.service import latest_valuation
+from acqbot.valuation.service import is_manual, latest_valuation
 
 router = APIRouter(prefix="/console", tags=["console"])
 
@@ -96,6 +105,28 @@ def _flash(request: Request) -> tuple[str, str] | None:
         return None
     kind, text = raw.split(":", 1)
     return ("bad" if kind == "bad" else "ok", text[:300])
+
+
+def _page(title: str, body: str, request: Request | None = None) -> str:
+    """Every signed-in page. Says so, on every screen, when any figure or check is made up — a
+    person demoing the console to the sales floor must never mistake a stub PPSR for a real one."""
+    cfg = get_settings()
+    stubs = on_test_data(cfg)
+    banner = (
+        "Test data: the "
+        + ", ".join(KIND_LABEL[k] for k in stubs)
+        + " here are made up. Fine for trying things out, never for a real seller — production "
+        "refuses to start like this."
+        if stubs
+        else None
+    )
+    return page(
+        title,
+        body,
+        flash=_flash(request) if request is not None else None,
+        banner=banner,
+        footer=MANUAL_FOOTER if pricing_is_manual(cfg) else ENGINE_FOOTER,
+    )
 
 
 # ------------------------------------------------------------------------------- sign in
@@ -159,6 +190,22 @@ def _queue(request: Request) -> str:
         waiting_packets = len(
             list(s.scalars(select(HandoffPacket).where(HandoffPacket.claimed_at.is_(None))))
         )
+        # Leads added but not yet in a conversation: the salesperson may need the link again.
+        not_started = [
+            lead
+            for lead in s.scalars(
+                select(Lead).where(Lead.state == LeadState.NEW).order_by(Lead.created_at.desc()).limit(20)
+            )
+            if s.scalars(select(Thread.thread_id).where(Thread.lead_id == lead.lead_id).limit(1)).first()
+            is None
+        ]
+        waiting_rows = "".join(
+            f'<div class="card"><div class="row"><div class="grow">{esc(_lead_line(lead))}'
+            f'<div class="sub">{esc((lead.upstream_payload or {}).get("seller", {}).get("display_name"))}'
+            f" · added {esc(ago(lead.created_at))}</div></div>"
+            f'<a href="/console/leads/{lead.lead_id}">Link and message →</a></div></div>'
+            for lead in not_started
+        )
         rows = []
         for e in open_items:
             lead = leads.get(e.lead_id)
@@ -187,6 +234,8 @@ def _queue(request: Request) -> str:
             )
     body = ["<h2>Needs a person</h2>"]
     body.append("".join(rows) if rows else '<p class="empty">Nothing waiting. The queue is clear.</p>')
+    if waiting_rows:
+        body.append(f"<h2>Waiting for the seller to tap the link</h2>{waiting_rows}")
     extra = []
     if waiting_packets:
         extra.append(f'<a href="/console/handoffs">{waiting_packets} deal packet(s) awaiting a closer</a>')
@@ -194,7 +243,7 @@ def _queue(request: Request) -> str:
         extra.append('<a href="/console/threads">conversations not matched to a lead</a>')
     if extra:
         body.append(f'<h2>Also</h2><p class="sub">{" · ".join(extra)}</p>')
-    return page("Queue", "".join(body), flash=_flash(request))
+    return _page("Queue", "".join(body), request)
 
 
 def _ceiling_block(lead_id: Any, e: Escalation) -> str:
@@ -223,7 +272,285 @@ def _ceiling_block(lead_id: Any, e: Escalation) -> str:
     )
 
 
+# ------------------------------------------------------------------------------- add a lead
+#
+# Figure 1 has the leads arriving from "existing software" over a signed webhook. Until that exists,
+# a salesperson who spots a car on Marketplace is the upstream source: this form builds the same
+# Figure 2 payload and hands it to the same `ingest_lead` the webhook uses, so validation, dedupe and
+# enrichment are identical whichever way a lead arrives.
+
+_MARKETPLACE_ITEM = re.compile(r"facebook\.com/marketplace/item/(\d+)", re.I)
+_LEAD_FIELDS = {
+    "listing_url": "Marketplace listing link",
+    "seller_name": "Seller's name, as on Marketplace",
+    "seller_phone": "Seller's mobile, if the listing shows one",
+    "make": "Make",
+    "model": "Model",
+    "variant": "Variant (if known)",
+    "year": "Year",
+    "odometer_km": "Odometer (km)",
+    "asking_price": "Asking price ($)",
+    "rego": "Rego (if shown)",
+    "vin": "VIN (if shown)",
+    "suburb": "Suburb",
+    "postcode": "Postcode",
+}
+# Contract field paths → the label a person typed into.
+_CONTRACT_LABEL = {
+    "listing_url": "listing_url",
+    "seller.display_name": "seller_name",
+    "seller.phone": "seller_phone",
+    "vehicle_claimed.make": "make",
+    "vehicle_claimed.model": "model",
+    "vehicle_claimed.variant": "variant",
+    "vehicle_claimed.year": "year",
+    "vehicle_claimed.odometer_km": "odometer_km",
+    "vehicle_claimed.asking_price_aud": "asking_price",
+    "vehicle_claimed.rego": "rego",
+    "vehicle_claimed.vin": "vin",
+    "location.suburb": "suburb",
+    "location.postcode": "postcode",
+}
+
+
+def _number(text: str | None) -> int | None:
+    digits = re.sub(r"[^\d.]", "", text or "")
+    if not digits:
+        return None
+    try:
+        return int(float(digits))
+    except ValueError:
+        return None
+
+
+def _lead_form(values: dict[str, str], errors: list[str]) -> str:
+    v = {
+        k: esc(values.get(k, ""))
+        for k in [*_LEAD_FIELDS, "description", "notes", "by", "state", "fuel", "transmission"]
+    }
+
+    def box(name: str, *, required: bool = False, wide: bool = False, kind: str = "text") -> str:
+        return (
+            f"<label{' class=wide' if wide else ''}>{esc(_LEAD_FIELDS[name])}{' *' if required else ''}"
+            f'<input type="{kind}" name="{name}" value="{v[name]}"{" required" if required else ""}></label>'
+        )
+
+    def choose(name: str, label: str, options: list[str], default: str) -> str:
+        current = values.get(name) or default
+        opts = "".join(
+            f'<option value="{o}"{" selected" if o == current else ""}>{o}</option>' for o in options
+        )
+        return f'<label>{esc(label)} *<select name="{name}" required>{opts}</select></label>'
+
+    problems = (
+        '<div class="errors"><b>That lead was not added:</b><ul>'
+        + "".join(f"<li>{esc(e)}</li>" for e in errors)
+        + "</ul></div>"
+        if errors
+        else ""
+    )
+    return (
+        "<h2>Add a lead from Marketplace</h2>"
+        '<p class="sub">Copy the details from the listing. Once it is added you get the link to send the '
+        "seller — the assistant takes over when they tap it.</p>"
+        f"{problems}"
+        '<div class="card"><form method="post" action="/console/leads/new"><div class="grid">'
+        + box("listing_url", required=True, wide=True)
+        + box("seller_name", required=True)
+        + box("seller_phone")
+        + box("make", required=True)
+        + box("model", required=True)
+        + box("variant")
+        + box("year", required=True)
+        + box("odometer_km", required=True)
+        + box("asking_price", required=True)
+        + choose("transmission", "Transmission", ["auto", "manual"], "auto")
+        + choose("fuel", "Fuel", ["petrol", "diesel", "hybrid", "ev"], "petrol")
+        + box("rego")
+        + box("vin")
+        + box("suburb", required=True)
+        + choose("state", "State", ["VIC", "NSW", "QLD", "SA", "WA", "TAS", "NT", "ACT"], "VIC")
+        + box("postcode", required=True)
+        + f'<label class=wide>Listing text (paste it)<textarea name="description">{v["description"]}</textarea></label>'
+        + f'<label class=wide>Anything else worth knowing<textarea name="notes">{v["notes"]}</textarea></label>'
+        + f'<label>Your name *<input name="by" value="{v["by"]}" required></label>'
+        + '</div><p><button type="submit">Add lead</button></p></form></div>'
+    )
+
+
+@router.get("/leads/new", response_class=HTMLResponse)
+def new_lead_page(request: Request) -> HTMLResponse:
+    _guard(request)
+    return HTMLResponse(_page("Add lead", _lead_form({}, []), request))
+
+
+@router.post("/leads/new", response_class=HTMLResponse)
+async def add_lead(request: Request) -> Any:
+    _guard(request)
+    form = {k: str(v).strip() for k, v in (await request.form()).items()}
+    by = form.get("by", "")[:64] or "console"
+    errors: list[str] = []
+    numbers: dict[str, int | None] = {}
+    for key in ("year", "odometer_km", "asking_price"):
+        numbers[key] = _number(form.get(key))
+        if numbers[key] is None:
+            errors.append(f"{_LEAD_FIELDS[key]}: needs a number.")
+    if errors:
+        return HTMLResponse(_page("Add lead", _lead_form(form, errors), request), status_code=422)
+
+    lead_id = uuid.uuid4()
+    url = form.get("listing_url", "")
+    item = _MARKETPLACE_ITEM.search(url)
+    payload = {
+        "schema_version": "1.0",
+        "lead_id": str(lead_id),
+        "source": "fb_marketplace",
+        "listing_url": url,
+        "seller": {
+            # Marketplace never shows a seller's platform id. The listing's own id stands in, so the
+            # same listing added twice is caught by the 90-day dedupe [3.2] like any other repeat.
+            "platform_id": f"fb-marketplace-item:{item.group(1)}" if item else f"console:{lead_id}",
+            "display_name": form.get("seller_name", ""),
+            "phone": form.get("seller_phone") or None,
+        },
+        "vehicle_claimed": {
+            "make": form.get("make", ""),
+            "model": form.get("model", ""),
+            "variant": form.get("variant") or None,
+            "year": numbers["year"],
+            "odometer_km": numbers["odometer_km"],
+            "rego": form.get("rego") or None,
+            "vin": form.get("vin") or None,
+            "transmission": form.get("transmission") or "auto",
+            "fuel": form.get("fuel") or "petrol",
+            "asking_price_aud": numbers["asking_price"],
+            "description_raw": form.get("description", ""),
+            "images": [],
+        },
+        "location": {
+            "suburb": form.get("suburb", ""),
+            "state": form.get("state") or "VIC",
+            "postcode": form.get("postcode", ""),
+        },
+        "qualified_at": datetime.now(UTC).isoformat(),
+        "qualification_notes": f"Added in the console by {by}. {form.get('notes', '')}".strip(),
+    }
+    try:
+        with session_scope() as s:
+            result = ingest_lead(s, payload)
+            if result.status == "duplicate":
+                return _redirect(
+                    f"/console/leads/{result.duplicate_of}",
+                    flash="Already added — this is the same listing. Here it is.",
+                    bad=True,
+                )
+            lead = s.get(Lead, result.lead_id)
+            # Decided now rather than at the first message, so the invitation the salesperson sends
+            # and the assistant's opening name the same person.
+            from acqbot.conversation.service import agent_for
+
+            agent_for(s, lead, get_settings())
+    except LeadContractError as exc:
+        for err in exc.errors or []:
+            loc = err.get("loc", "")
+            path = loc if isinstance(loc, str) else ".".join(str(p) for p in loc)
+            label = _LEAD_FIELDS.get(_CONTRACT_LABEL.get(path, ""), path or "form")
+            errors.append(f"{label}: {err.get('msg', 'not valid')}")
+        return HTMLResponse(
+            _page("Add lead", _lead_form(form, errors or [str(exc)]), request), status_code=422
+        )
+    return _redirect(f"/console/leads/{lead_id}", flash="Lead added. Send the seller the message below.")
+
+
 # ------------------------------------------------------------------------------- one lead
+
+
+def _words(key: str, value: Any) -> str:
+    """A fact in words, whatever shape a seller's answer was stored in."""
+    try:
+        rendered = _render_fact(key, value)
+    except (AttributeError, TypeError, ValueError):
+        rendered = None
+    return fact_value(key, rendered, value)
+
+
+def _start_card(lead_id: Any, seller: str, vehicle: str, agent: str | None, cfg: Any) -> str:
+    """The first touch, for the salesperson to send from Marketplace (the assistant cannot)."""
+    link = T.marketplace_link(cfg.messenger_page_username, lead_id)
+    message = T.marketplace_invite(
+        dealership=cfg.dealership_name,
+        lmct=cfg.dealership_lmct,
+        agent=agent,
+        seller_name=seller,
+        vehicle=vehicle,
+        link=link,
+    )
+    placeholder = cfg.messenger_page_username.strip().lower() in {"", "yourpage"}
+    ppsr_first = (
+        '<p class="sub" style="margin:8px 0 0">If the listing shows the rego or VIN, run the PPSR check '
+        "first and record it below: a written-off or stolen car should never be contacted.</p>"
+        if "ppsr" in done_by_a_person(cfg)
+        else ""
+    )
+    return (
+        '<h2>Start the conversation</h2><div class="card">'
+        f'<p class="sub" style="margin:0">Send {esc(seller)} this on Marketplace'
+        + (f", as {esc(agent)}" if agent else "")
+        + ". When they tap the link and message the Page, the assistant takes over.</p>"
+        f'<div class="copy">{esc(message)}</div>'
+        + (
+            '<div class="warnbox">The link points at a placeholder Page. Set ACQBOT_MESSENGER_PAGE_USERNAME '
+            "to the Facebook Page's username once it exists.</div>"
+            if placeholder
+            else ""
+        )
+        + f"{ppsr_first}</div>"
+    )
+
+
+def _checks_form(lead_id: Any, year: Any, vin: str, rego: str, *, before_contact: bool) -> str:
+    """Everything a PPSR search certificate answers, in one go. Every result is a deliberate choice:
+    no field defaults to the good answer, because a hurried "no" on "written off" is the one mistake
+    this form exists to prevent."""
+
+    def pick(name: str, label: str, options: list[tuple[str, str]]) -> str:
+        opts = '<option value="" selected disabled>choose…</option>' + "".join(
+            f'<option value="{v}">{esc(t)}</option>' for v, t in options
+        )
+        return f'<label>{esc(label)} *<select name="{name}" required>{opts}</select></label>'
+
+    ident = (
+        f"rego {rego}" if rego else (f"VIN {vin}" if vin else "the rego or VIN (ask the seller if needed)")
+    )
+    return (
+        "<h2>Record the PPSR check</h2>"
+        f'<p class="sub">Search {esc(ident)} on ppsr.gov.au and copy the certificate here.'
+        + (" Doing it now, before contact, is best." if before_contact else "")
+        + "</p>"
+        f'<div class="card"><form method="post" action="/console/leads/{lead_id}/checks"><div class="grid">'
+        + pick("finance", "Finance owing", [("no", "no"), ("yes", "yes")])
+        + '<label>Amount owing ($), if any<input name="amount_owing"></label>'
+        + pick(
+            "written_off",
+            "Written off",
+            [("no", "no"), ("repairable", "repairable"), ("statutory", "statutory")],
+        )
+        + pick("stolen", "Reported stolen", [("no", "no"), ("yes", "yes")])
+        + pick(
+            "rego_status",
+            "Registration",
+            [("current", "current"), ("expired", "expired"), ("unregistered", "unregistered")],
+        )
+        + '<label>Rego expiry<input type="date" name="rego_expiry"></label>'
+        + f'<label>Year *<input name="year" value="{esc(year)}" required></label>'
+        + f'<label>VIN<input name="vin" value="{esc(vin)}"></label>'
+        + '<label>Certificate number<input name="certificate"></label>'
+        + '<label>Odometer on the dash photo (km)<input name="odometer_km"></label>'
+        + '<label>Your name *<input name="by" required></label>'
+        + '</div><p><button type="submit">Record the check</button></p></form>'
+        '<p class="sub" style="margin:4px 0 0">Written off or stolen stops the conversation and comes back '
+        "to the queue. The odometer is optional here — it can also be confirmed from the photos later.</p></div>"
+    )
 
 
 @router.get("/leads/{lead_id}", response_class=HTMLResponse)
@@ -264,6 +591,19 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
         confirmed = dict(sheet.confirmed)
         claimed = dict(sheet.claimed)
         packet_json = packet.packet if packet else None
+        has_thread = (
+            s.scalars(select(Thread.thread_id).where(Thread.lead_id == lead_id).limit(1)).first() is not None
+        )
+        assignment = s.get(AgentAssignment, lead_id)
+        agent = assignment.agent if assignment else None
+        manual_val = is_manual(val)
+        ppsr_recorded = sheet.verified_from("finance_owing", ("ppsr",))
+        closed = lead.state in CLOSED_STATES or lead.state == LeadState.TERMINATED
+        not_started = lead.state == LeadState.NEW and not has_thread
+        year_on_file = sheet.get("year")
+        vin_on_file = sheet.get("vin") or ""
+        rego_on_file = sheet.get("rego") or ""
+        car_words = T._vehicle(sheet.get) or vehicle
 
     out: list[str] = []
     out.append(
@@ -273,10 +613,15 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
         + f" · {calls} model call(s)</p></div></div>"
     )
 
+    if not_started:
+        out.append(_start_card(lead_id, seller, car_words, agent, cfg))
+
     if contradicted:
+        # In words, not storage: a PPSR result is a dict, and "seller said {'owing': False}" is
+        # not something a salesperson should have to read.
         lines = "; ".join(
-            f"{esc(k.replace('_', ' '))}: seller said {esc(v.get('claimed'))}, "
-            f"{esc(v.get('source'))} shows {esc(v.get('actual'))}"
+            f"{esc(k.replace('_', ' '))}: seller said {esc(_words(k, v.get('claimed')))}, "
+            f"{esc(v.get('source'))} shows {esc(_words(k, v.get('actual')))}"
             for k, v in contradicted.items()
         )
         out.append(f'<div class="warnbox">Contradicted claims — {lines}</div>')
@@ -303,10 +648,24 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
                 f'<button type="submit">Resolve</button></form></div>'
             )
 
+    # --- the PPSR check, when a person does it ---
+    if "ppsr" in done_by_a_person(cfg) and not ppsr_recorded and not closed:
+        out.append(_checks_form(lead_id, year_on_file, vin_on_file, rego_on_file, before_contact=not_started))
+
     # --- valuation and offers ---
     out.append("<h2>Valuation</h2>")
     if not val:
         out.append('<p class="empty">Not priced yet.</p>')
+    elif manual_val:
+        out.append(
+            '<p class="sub">Pricing is manual — no price data is connected, so a person sets the figure.</p>'
+            + (
+                ""
+                if released
+                else '<div class="warnbox">Not every check is verified yet — record the PPSR check and '
+                "confirm the odometer before pricing.</div>"
+            )
+        )
     else:
         # JSONB hands the ladder back in whatever order it was stored; a person reads it upwards.
         ordered = [k for k in LADDER_ORDER if k in ladder] + [k for k in ladder if k not in LADDER_ORDER]
@@ -336,7 +695,24 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
             f"<th>Presented</th></tr>{rows}</table>"
         )
 
-    if released and state in {"PRICED", "OFFER_MADE", "NEGOTIATING", "HUMAN"}:
+    if released and manual_val and state in {"PRICED", "OFFER_MADE", "NEGOTIATING", "HUMAN"}:
+        first = not offers
+        out.append(
+            f'<h2>{"Set the price" if first else "Send a new figure"}</h2><div class="card">'
+            f'<form class="inline" method="post" action="/console/leads/{lead_id}/present-offer">'
+            f'<input type="hidden" name="step" value="human">'
+            f'<input name="amount_aud" placeholder="Amount, e.g. 18,500" required size="20">'
+            f'<input name="by" placeholder="Your name" required>'
+            f'<button type="submit">Send offer</button></form>'
+            f'<p class="sub" style="margin:10px 0 0">'
+            + (
+                "Goes to the seller as a firm offer, subject to inspection, open for 48 hours."
+                if first
+                else "Goes to the seller as “I can go to $… — same terms”, with a fresh 48 hours."
+            )
+            + " Recorded against your name.</p></div>"
+        )
+    elif released and state in {"PRICED", "OFFER_MADE", "NEGOTIATING", "HUMAN"}:
         options = "".join(
             f'<option value="{s.value}">{LADDER_LABEL.get(s.value, s.value)} — '
             f"{money(ladder.get(s.value))}</option>"
@@ -426,7 +802,7 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
             f'<div class="who"><span>{who}</span><span class="meta">{esc(ago(_dt(m["at"])))}{tag}</span></div>'
             f"<p>{esc(body_text)}</p></div>"
         )
-    return HTMLResponse(page(vehicle, "".join(out), flash=_flash(request)))
+    return HTMLResponse(_page(vehicle, "".join(out), request))
 
 
 def _dt(iso: str | None) -> datetime | None:
@@ -528,6 +904,49 @@ def do_fact(
     return _redirect(f"/console/leads/{lead_id}", flash=note)
 
 
+@router.post("/leads/{lead_id}/checks")
+async def do_checks(request: Request, lead_id: uuid.UUID) -> Any:
+    _guard(request)
+    form = {k: str(v).strip() for k, v in (await request.form()).items()}
+    back = f"/console/leads/{lead_id}"
+    try:
+        expiry = date.fromisoformat(form["rego_expiry"]) if form.get("rego_expiry") else None
+        body = admin.RecordChecks(
+            finance_owing=form.get("finance") == "yes",
+            amount_owing_aud=_number(form.get("amount_owing")),
+            written_off=form.get("written_off") or "",
+            stolen=form.get("stolen") == "yes",
+            rego_status=form.get("rego_status") or "",
+            rego_expiry=expiry,
+            year=_number(form.get("year")) or 0,
+            vin=form.get("vin") or None,
+            odometer_km=_number(form.get("odometer_km")),
+            certificate=form.get("certificate") or None,
+            by=form.get("by", "")[:64] or "console",
+        )
+        if form.get("finance") not in {"yes", "no"} or form.get("stolen") not in {"yes", "no"}:
+            raise ValueError("Choose yes or no for finance owing and reported stolen.")
+        out = admin.record_checks(lead_id, body)
+    except ValidationError as exc:
+        fields = ", ".join(sorted({str(e["loc"][0]).replace("_", " ") for e in exc.errors()}))
+        return _redirect(back, flash=f"Check these and try again: {fields}.", bad=True)
+    except HTTPException as exc:
+        return _redirect(back, flash=str(exc.detail), bad=True)
+    except ValueError as exc:
+        return _redirect(back, flash=str(exc), bad=True)
+    if out["result"] == "terminated":
+        note = (
+            "Recorded. It is written off or stolen, so the lead is closed — the seller was never contacted."
+        )
+    elif out["result"] == "escalated":
+        note = "Recorded. It is written off or stolen — it's in the queue for someone to tell the seller."
+    else:
+        note = "Checks recorded." + (
+            " Pricing is next." if out["state"] in {"VERIFICATION", "PRICED"} else ""
+        )
+    return _redirect(back, flash=note, bad=out["result"] != "clear")
+
+
 # ------------------------------------------------------------------------------- handoffs
 
 
@@ -570,7 +989,7 @@ def handoffs_page(request: Request) -> HTMLResponse:
                 f"</div></div>"
             )
     body = "<h2>Deal packets</h2>" + ("".join(cards) or '<p class="empty">No deals agreed yet.</p>')
-    return HTMLResponse(page("Handoffs", body, flash=_flash(request)))
+    return HTMLResponse(_page("Handoffs", body, request))
 
 
 @router.post("/handoffs/{packet_id}/claim")
@@ -610,7 +1029,7 @@ def threads_page(request: Request) -> HTMLResponse:
     body = "<h2>Conversations with no lead</h2>" + (
         "".join(cards) or '<p class="empty">Every conversation is matched to a lead.</p>'
     )
-    return HTMLResponse(page("Unlinked", body, flash=_flash(request)))
+    return HTMLResponse(_page("Unlinked", body, request))
 
 
 @router.post("/threads/{thread_id}/link")

@@ -53,9 +53,9 @@ const table = (headers, rows, widths) =>
 
 // ---------------------------------------------------------------- the messages
 
-const D = "[DEALERSHIP]";
-const L = "[NUMBER]";
-const A = "[BUYER NAME]";
+const D = "Direct Auto";
+const L = "0013130";
+const A = "[SALESPERSON]";
 
 const body = [
   new Paragraph({ spacing: { after: 0 }, children: [new TextRun({ text: "For legal review", color: GREY, size: 20, allCaps: true, bold: true })] }),
@@ -64,11 +64,11 @@ const body = [
   new Paragraph({
     spacing: { after: 300 },
     border: { top: { style: BorderStyle.SINGLE, size: 6, color: RULE, space: 8 }, bottom: { style: BorderStyle.SINGLE, size: 6, color: RULE, space: 8 } },
-    children: [new TextRun({ text: "Prepared 18 September 2026  ·  Draft 1.0  ·  Jurisdiction: Victoria  ·  Not legal advice", size: 19, color: GREY })],
+    children: [new TextRun({ text: "Prepared for Direct Auto (Stateline Holdings Pty Ltd)  ·  21 September 2026  ·  Draft 1.3  ·  Jurisdiction: Victoria  ·  Not legal advice", size: 19, color: GREY })],
   }),
 
   h1("1.  What this is, and what we are asking"),
-  p("A dealership is putting an automated assistant in front of private sellers advertising cars on Facebook Marketplace. The assistant opens the conversation, asks a set series of questions about the vehicle, and — within limits a person sets in advance — makes a firm offer to buy. When a seller accepts, a human takes over.", { run: { size: 21 } }),
+  p("A dealership is putting an automated assistant in front of private sellers advertising cars on Facebook Marketplace. A salesperson invites the seller to the dealership's Facebook Page; the assistant then asks a set series of questions about the vehicle, and a firm offer to buy follows — at launch always set by a person. When a seller accepts, a human takes over.", { run: { size: 21 } }),
   p("This document contains every message the system is capable of sending. There are no others. We are asking counsel to confirm the wording is compliant before the system speaks to a member of the public.", { run: { size: 21 } }),
   h2("The questions"),
   numbered("Is the disclosure at §3.1 sufficient, in form and in placement, for the Motor Car Traders Act 1986 (Vic) and for s18 of the Australian Consumer Law?"),
@@ -82,21 +82,27 @@ const body = [
 
   h1("2.  How a conversation runs"),
   p("Enough to read the messages in context. The sequence is fixed in code; the assistant cannot skip a step or invent one.", { run: { size: 21 } }),
-  bullet("A lead arrives from a sourcing platform. The seller is already in the dealership's Facebook Page inbox, so the first message lands in an existing thread."),
-  bullet("The assistant introduces itself, discloses that it is automated, and begins asking about the car — ten required facts: variant, odometer, service history, panel and paint, mechanical faults, tyres, keys, registration status, rego or VIN, and photographs."),
-  bullet("A registration and PPSR check runs. A written-off or stolen vehicle ends the conversation before any offer."),
-  bullet("A valuation is computed in code. The language model never sees a price and never calculates one."),
+  bullet("A salesperson finds a car on Facebook Marketplace, adds it to the system, and messages the seller from Marketplace with a link to the dealership's Facebook Page (suggested wording at §3.0). When the seller taps the link and writes to the Page, the assistant takes over."),
+  bullet("The assistant introduces itself, discloses that it is automated, and begins asking about the car — ten required facts: variant, odometer, service history, panel and paint, mechanical faults, tyres, keys, registration status, rego or VIN, and five photographs (front, back, both sides, and the dashboard with the ignition on)."),
+  bullet("A person runs a PPSR search and records the result — ideally before the seller is contacted. A written-off or stolen vehicle gets no offer: before contact the lead simply ends; after contact a person tells the seller."),
+  bullet("At launch a person sets every price. No price data is connected yet, and nothing automated can produce a figure. A valuation computed in code can take over once price data is connected and checked against past purchases. The language model never sees a price and never calculates one."),
   bullet("An offer is presented — at first only by a person, later, once the dealership is satisfied with the wording, automatically."),
-  bullet("The assistant may concede twice, to figures authorised in advance. Anything beyond that is a human decision."),
+  bullet("Once pricing is automated, the assistant may concede twice, to figures authorised in advance. Until then, and beyond those two steps always, every counter-offer goes to a person."),
   bullet("On acceptance, a person takes over. The assistant does not arrange payment or sign anything."),
   note("Eight circumstances stop the assistant and hand to a person immediately, including any mention of a deceased estate, a seller who is not the owner, financial distress, legal threats, or a request to speak to a human."),
 
   h1("3.  Fixed messages"),
   p("Reproduced verbatim. Square brackets are filled from configuration at send time; nothing else varies.", { run: { size: 21 } }),
 
+  h2("3.0  Before the assistant: the salesperson's Marketplace message"),
+  note("Sent by a salesperson from their own Marketplace account — Marketplace offers no way for software to message a seller. The system suggests this wording and fills it in; it names the same salesperson the assistant will say it works with, and says up front that an automated assistant takes it from there."),
+  ...quote([`Hi [FIRST NAME], ${A} from ${D} here (licensed dealer, LMCT ${L}). We'd like to make you an offer on your [YEAR MAKE MODEL]. Our automated assistant can take the details — tap here to start: [LINK TO THE DEALERSHIP'S FACEBOOK PAGE]`]),
+
   h2("3.1  Disclosure — first message of every conversation"),
   note("Sent as part of the opening message, before any question is asked."),
-  ...quote([`Hi [FIRST NAME], ${A} here from ${D}. Quick note before we start: this is an automated assistant from ${D} (LMCT ${L}). A person from our team is available any time — just ask.`, "", "We're interested in your [YEAR MAKE MODEL]. [FIRST QUESTION]"]),
+  ...quote([`Hi [FIRST NAME], this is the automated assistant for ${D} (LMCT ${L}). I'm working with ${A} from our team, and you can ask for a person at any point.`, "", "We're interested in your [YEAR MAKE MODEL]. [FIRST QUESTION]"]),
+  note("[SALESPERSON] is one of Direct Auto's four salespeople — Vikram, Peter, Simon or Robin — chosen once per seller and the same in every later message. Changed 21 September: the opening used to begin \"[SALESPERSON] here from Direct Auto\", which, once the names became real employees, had the assistant speaking as a real person. See §6.4."),
+  note("The LMCT number is as printed on directauto.net.au and should be confirmed against the licence. An earlier draft said \"a person from our team is available any time\" — untrue for a business open Monday to Saturday that promises a call within one business day. What is true at every hour is that the seller can ask, and the assistant hands over."),
 
   h2("3.2  Identifying itself when challenged"),
   note("Sent whenever the seller asks whether they are talking to a person, in any form of words. The conversation then goes to a human and the assistant stops."),
@@ -105,13 +111,14 @@ const body = [
   h2("3.3  During discovery"),
   note("One question at a time. If an answer contradicts the listing or a check, the assistant raises it rather than choosing a side."),
   ...quote(["One thing to check: the listing said [FIELD] [CLAIMED], but [the PPSR check / the VIN decode / the rego check / the photos] shows [ACTUAL]. Which is right?"]),
-  ...quote(["Got [N] — could you send the rest? I need [M] in total: the six exterior angles, the interior, and the dash with the ignition on."]),
+  ...quote(["Got [N] — could you send the rest? I need 5 in total: the front, the back, both sides, and the dash with the ignition on so the odometer shows."]),
+  note("Five photographs, matching the \"at least 5 photos\" on the dealership's own sell form. An earlier version asked for six and then listed eight."),
   ...quote(["Thanks, that's everything I need. I'm running the checks now and will come back with a firm number shortly."]),
 
   h2("3.4  The offer"),
-  note("Two modes. At launch — and for as long as the dealership wants — a valuation is computed but a person decides whether and at what figure to present it. The assistant says only this, and then stops:"),
+  note("Two modes. At launch a person sets the figure: no price data is connected, so there is nothing for the system to compute. Once the PPSR and other checks are done, the assistant says only this, and then stops:"),
   ...quote([`Thanks — I've got everything. ${A} is working out a firm number and will send it through shortly.`]),
-  note("Once the dealership switches automatic presentation on, the assistant presents the opening figure itself. The figure is computed in code from the valuation and the margin the dealership sets. The expiry is real: when it passes, the offer is marked lapsed in the database and the assistant cannot present that figure again."),
+  note("The figure the person types goes to the seller as the message below. Later, once price data is connected and the dealership switches automatic presentation on, the assistant presents the opening figure itself, computed in code from the valuation and the margin the dealership sets. Either way the expiry is real: when it passes, the offer is marked lapsed in the database and the assistant cannot present that figure again."),
   ...quote([`Here's where we've landed: $[AMOUNT] for the [VEHICLE], subject to inspection. That's a firm offer and it's open until [TIME] on [DAY DATE] — after that the valuation inputs move and it lapses.`, "", `If it works, reply yes and ${A} will book the inspection and sort payment. If not, no pressure — just let me know.`]),
 
   h2("3.5  Negotiation and its limits"),
@@ -181,12 +188,21 @@ const body = [
   p("Whether providing the number in answer to this establishes consent for a commercial text — inferred or express — is question 4. If express consent is required, the assistant must ask for it in terms, and we would add the wording to the discovery sequence.", { run: { size: 21 } }),
 
   h2("6.3  How many conversations one named buyer can hold"),
-  p("Several named buyers operate under the one dealership. A name holding an implausible number of simultaneous conversations invites the inference that it is not a person, which is the impression §5.1 exists to avoid. The system now spreads leads across the configured names and limits how many live conversations each holds. We would like counsel's view on whether the names must correspond to actual employees.", { run: { size: 21 } }),
+  p("The names are Direct Auto's own salespeople — Vikram, Peter, Simon and Robin — so every name a seller is given belongs to a real person they will deal with at inspection. A name holding an implausible number of simultaneous conversations would still invite the inference that it is not a person, so the system spreads sellers across the four and prefers another name once one is in twelve live conversations. Twelve is a placeholder for the dealership to set against what each person can actually follow up.", { run: { size: 21 } }),
 
   h2("6.4  Who the assistant says it is"),
-  p("The opening message says \"[BUYER NAME] here from [DEALERSHIP]\" and, in the next sentence, that \"this is an automated assistant\". Later messages refer to [BUYER NAME] in the third person, as the person who will book the inspection. A seller could reasonably read the opening as the assistant's own name, and the closing as a different, human [BUYER NAME]. We would like counsel's view on whether this is clear enough, or whether the opening should instead introduce the assistant as working for a named person — for example, \"[DEALERSHIP]'s automated assistant here, working with [BUYER NAME] from our buying team\".", { run: { size: 21 } }),
+  p("Changed 21 September. The opening used to say \"[SALESPERSON] here from Direct Auto\" and, in the next sentence, that \"this is an automated assistant\". While the name was a placeholder that was a question of clarity; once the names became real employees it had the assistant speaking as a real person, and a seller could fairly read the first line as Vikram typing. It now introduces itself as the dealership's automated assistant working with a named salesperson (§3.1). The language model is instructed to write only as the assistant, never as the salesperson, and later messages refer to the salesperson in the third person, as the person who books the inspection.", { run: { size: 21 } }),
+  p("We would like counsel to confirm this wording, and to say whether anything is needed from the salespeople themselves for their names to be used this way.", { run: { size: 21 } }),
 
-  h2("6.5  Retention"),
+  h2("6.5  Consistency with directauto.net.au"),
+  p("The website makes three promises to sellers that sit awkwardly against how the assistant negotiates. A seller who arrives from the website — or checks it mid-conversation — will hold the assistant to them, and a representation that is true on one channel and not on another is a question under s18.", { run: { size: 21 } }),
+  bullet("\"No lowballing.\" The assistant opens at 88% of the most the dealership will pay, and moves to 93% and then 97% if the seller pushes. Every figure is a genuine, authorised offer and nothing it says is untrue — the gate refuses any claim that a figure is the best or final one — but a seller who is offered more for asking may reasonably call the first figure a lowball."),
+  bullet("\"No last-minute changes.\" Every offer the assistant makes is subject to inspection, so the price can change at inspection if the car differs from what the seller described."),
+  bullet("\"We explain how we arrived at your number.\" The assistant cannot: by design it is given only the figure, never the valuation behind it. When asked, it now says a named person from the team can walk the seller through it."),
+  note("A fourth, on the FAQ, is currently not true of the assistant's figures: the valuation considers \"current market demand\". The market adjustment is built but has no data feeding it yet, so it contributes nothing. It becomes true once market data is connected."),
+  p("We would like counsel's view on whether the negotiating approach and the website wording can stand together as they are, or whether one should change.", { run: { size: 21 } }),
+
+  h2("6.6  Retention"),
   p("Conversations, offers, valuations and model calls are stored permanently and cannot be altered or deleted — deliberately, because the record is what demonstrates what was said. We have not set a retention period and would like advice on whether one is required and what it should be.", { run: { size: 21 } }),
 
   h1("7.  Inventory"),

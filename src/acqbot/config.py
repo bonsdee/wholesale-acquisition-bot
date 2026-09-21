@@ -6,14 +6,20 @@ without a deploy. Nothing in this module is read by the language model directly.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The test suite sets ACQBOT_DOTENV=0 so it never reads a developer's .env. Before this, a real
+# Anthropic key or ACQBOT_ENVIRONMENT=production in someone's .env reached every test that did not
+# override it — spending API credit and failing tests that expect scripted wording.
+_ENV_FILE = None if os.environ.get("ACQBOT_DOTENV", "1") == "0" else ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ACQBOT_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ACQBOT_", env_file=_ENV_FILE, extra="ignore")
 
     # Database
     database_url: str = "postgresql+pg8000://postgres:postgres@127.0.0.1:5432/acqbot"
@@ -24,9 +30,17 @@ class Settings(BaseSettings):
     webhook_timestamp_tolerance_seconds: int = 300
 
     # Dealership identity — placeholders until confirmed
-    dealership_name: str = "Placeholder Motors"
-    dealership_lmct: str = "00000"  # number only; templates add the "LMCT" prefix
-    agent_names: list[str] = Field(default_factory=lambda: ["Alex"])
+    # Direct Auto, a trading name of Stateline Holdings Pty Ltd (ABN 69 695 170 453), 697 Burke Rd,
+    # Camberwell. The LMCT is as printed in the directauto.net.au footer — CONFIRM it against the
+    # Consumer Affairs Victoria register before go-live: it appears in the first message to every
+    # seller, and a wrong licence number there is worse than none.
+    dealership_name: str = "Direct Auto"
+    dealership_lmct: str = "0013130"  # number only; templates add the "LMCT" prefix
+    # The named buyers: Direct Auto's salespeople (client, 21 Sep). These are real people, so the
+    # assistant introduces itself as working WITH one of them and never speaks as them. Vic (GM,
+    # leads the sales team) and Winnie (interim COO, admin) are not on it. Each seller keeps the same
+    # name for the whole conversation (agent_assignments).
+    agent_names: list[str] = Field(default_factory=lambda: ["Vikram", "Peter", "Simon", "Robin"])
     # How many live conversations one named buyer may be holding before new leads prefer another
     # name. A soft cap: a seller is never made to wait for a free slot, but `acqbot doctor` says
     # so when every name is full. 0 disables the spreading entirely.
@@ -67,7 +81,10 @@ class Settings(BaseSettings):
     nudge_before_window_closes_hours: int = 20  # inside Messenger's 24h, while we may still send
     sms_nudge_hours: tuple[int, ...] = (24, 72)  # after the first, spaced for SMS courtesy norms
     max_nudges: int = 3
-    min_photos: int = 6
+    # Photographs needed to leave discovery. Five, as Direct Auto's own sell form asks (21 Sep). The
+    # question names five shots (PHOTO_SHOTS in facts/fields.py); at any other number the wording
+    # turns the list into a guide, but change the list too if the shots themselves change.
+    min_photos: int = 5
     human_sla_hours: int = 4  # escalation and handoff SLA (A.1 — placeholder until agreed)
     no_progress_turns: int = 3  # consecutive seller turns without progression → escalate (5.2)
     timezone: str = "Australia/Melbourne"
@@ -113,6 +130,26 @@ class Settings(BaseSettings):
             raise ValueError("ladder multipliers must be strictly between 0 and 1")
         return v
 
+    @field_validator("agent_names")
+    @classmethod
+    def _at_least_one_name(cls, v: list[str]) -> list[str]:
+        # There used to be a silent fallback to a made-up "Alex". Now that the opening tells every
+        # seller which real person the assistant works with, an invented name would be a false
+        # statement in the first message — so an empty roster is a startup error instead.
+        names = list(dict.fromkeys(n.strip() for n in v if n and n.strip()))
+        if not names:
+            raise ValueError(
+                "agent_names needs at least one name: the opening tells each seller who they'll deal with"
+            )
+        return names
+
+    @field_validator("min_photos")
+    @classmethod
+    def _at_least_one_photo(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("min_photos must be at least 1 — the dash photo is how the odometer is verified")
+        return v
+
     @field_validator("llm_provider")
     @classmethod
     def _known_provider(cls, v: str) -> str:
@@ -130,6 +167,11 @@ class Settings(BaseSettings):
         if v not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError("llm_effort must be one of low, medium, high, xhigh, max (or empty)")
         return v
+
+    @property
+    def is_production(self) -> bool:
+        """Real sellers. Test data is refused here (see enrichment/providers.py)."""
+        return self.environment.strip().lower() in {"production", "prod"}
 
     @property
     def resolved_llm_provider(self) -> str:
