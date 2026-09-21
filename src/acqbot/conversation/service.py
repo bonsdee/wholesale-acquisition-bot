@@ -1022,7 +1022,7 @@ class Conversation:
                 return Directive(
                     kind="ask_field",
                     template_id=f"ask:{SELLER_PHONE.key}",
-                    body=T.ask_field(SELLER_PHONE, preface="Thanks. " if changed else ""),
+                    body=T.ask_field(SELLER_PHONE, preface=T.ack(SELLER_PHONE.key) if changed else ""),
                     stage=view.stage,
                     asked_field=SELLER_PHONE.key,
                     instruction=ask_field_instruction(
@@ -1049,7 +1049,7 @@ class Conversation:
             return Directive(
                 kind="ask_field",
                 template_id=f"ask:{spec.key}",
-                body=T.ask_field(spec, preface="Thanks. " if changed else ""),
+                body=T.ask_field(spec, preface=T.ack(spec.key) if changed else ""),
                 stage=view.stage,
                 asked_field=spec.key,
                 instruction=ask_field_instruction(
@@ -1155,6 +1155,21 @@ class Conversation:
             )
         transition(self.s, lead, LeadState.PRICED, "valuation_released")
         if self.cfg.auto_present_offer:
+            # Second line of defence behind the valuation's own `not_viable` escalation: a lead a
+            # person handed back to the bot must not come round again to "$0, subject to
+            # inspection". Automation never presents below the minimum; a person still can.
+            val = latest_valuation(self.s, lead.lead_id, basis=ValuationBasis.VERIFIED)
+            opening = float((val.ladder or {}).get("opening", 0)) if val else 0.0
+            if opening < self.cfg.min_offer_aud:
+                escalate(
+                    self.s,
+                    lead,
+                    "not_viable",
+                    {"opening": opening, "min_offer_aud": self.cfg.min_offer_aud},
+                )
+                return HandleResult(
+                    action="escalated", lead_id=lead.lead_id, stage=lead.state.value, escalated="not_viable"
+                )
             offer = self.present_offer(lead, LadderStep.OPENING, presented_by="system")
             return HandleResult(
                 action="offer_presented",

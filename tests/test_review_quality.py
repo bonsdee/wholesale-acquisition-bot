@@ -81,6 +81,73 @@ def test_punctuation_and_case_do_not_hide_a_repeat():
     assert any("same sentence" in str(f) for f in repeated_wording(turns))
 
 
+def test_the_same_first_word_four_times_is_caught_even_when_the_rest_varies():
+    # Taken from the first real-model transcript, 21 Sep. The three-word check saw nothing, because
+    # "good to hear", "good to know" and "good thanks for" are all different — but a seller reads
+    # "Good… Good… Good… Good…" and hears a script.
+    turns = [
+        bot("Good to hear it's got a full logbook. How's the panel and paint?"),
+        seller("good"),
+        bot("Good to know, thanks. Any mechanical faults or warning lights?"),
+        seller("none"),
+        bot("Good to hear there's nothing mechanical to flag. What about the tyres?"),
+        seller("good"),
+        bot("Good, thanks for that. How many keys come with the car?"),
+    ]
+    fs = repeated_wording(turns)
+    assert any("starts 4 messages with the same word" in str(f) for f in fs), [str(f) for f in fs]
+
+
+def test_three_questions_starting_whats_is_not_a_tic():
+    # The scripted questions themselves open with "What's" three times. That is a question word
+    # doing its job, and flagging it would fire on every conversation.
+    turns = [
+        bot("What's the exact odometer reading?"),
+        seller("84,500"),
+        bot("What's the rego plate?"),
+        seller("1AB2CD"),
+        bot("What's the best mobile for you?"),
+    ]
+    assert repeated_wording(turns) == []
+
+
+def test_one_habit_is_reported_once_not_twice():
+    turns = [bot(f"Thanks for that. Question {i}?") for i in range(4)]
+    fs = repeated_wording(turns)
+    openers = [f for f in fs if "opens" in str(f) or "starts" in str(f)]
+    assert len(openers) == 1, [str(f) for f in fs]
+
+
+def test_writing_in_lowercase_is_caught():
+    # From the first full real-model run: 86 of 126 messages started lowercase, "i" and the
+    # seller's own name included, and no check noticed.
+    from acqbot.review_quality import lowercase
+
+    turns = [
+        bot("good to hear. how are the tyres?"),
+        seller("good"),
+        bot("got it. how many keys come with it?"),
+        seller("two"),
+        bot("we're running checks now — i'll come back to you shortly, mei."),
+    ]
+    checks = [str(f) for f in lowercase(turns)]
+    assert any("3 of 3 messages start with a lowercase letter" in c for c in checks), checks
+    assert any('"i" in lowercase' in c for c in checks), checks
+
+
+def test_normal_capitalisation_and_one_casual_ok_are_fine():
+    from acqbot.review_quality import lowercase
+
+    turns = [
+        bot("Good to hear. How are the tyres?"),
+        seller("good"),
+        bot("ok, and how many keys come with it?"),  # one casual lowercase start is not a style
+        seller("two"),
+        bot("I'll run the checks now and come back to you, Mei. It's in the dealer's name."),
+    ]
+    assert lowercase(turns) == []
+
+
 def test_scripted_wording_is_never_flagged_for_repeating_itself():
     # The templates are fixed by design and a conversation is full of them. If these counted, every
     # report would be noise and nobody would read the one line that mattered.

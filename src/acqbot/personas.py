@@ -276,7 +276,10 @@ DEFERRER = Persona(
 
 BAD_NEWS = Persona(
     name="bad-news",
-    why="Finance owing, hail damage, warning light, bald tyres, one key. None of it should soften the questions or the packet.",
+    why=(
+        "Finance owing, hail damage, warning light, bald tyres, one key. None of it should soften the "
+        "questions — and a car the numbers say is worth nothing goes to a person, never offered $0."
+    ),
     answers={
         "variant": ("{variant}",),
         "rego": ("{rego}",),
@@ -293,6 +296,10 @@ BAD_NEWS = Persona(
         "rego_status": ("Rego expired in June",),
     },
     expect_facts=FULL_DISCOVERY,
+    # Until 21 Sep this expected HANDOFF — and got it, by offering "$0, subject to inspection" and
+    # booking an inspection on "yes, deal". Everything collected, then a person decides.
+    expect_final=frozenset({"HUMAN"}),
+    expect_escalation="not_viable",
 )
 
 HOSTILE_ISH = Persona(

@@ -93,6 +93,11 @@ class AnthropicClient:
 
         self._anthropic = anthropic
         self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=max_retries)
+        # Models that have refused `effort`. Learned from the first 400 and never sent again: the
+        # first live run showed Haiku 4.5 rejecting it on EVERY extraction, so each seller message
+        # cost two requests — double the latency and double the draw on the rate limit — because
+        # the fallback below dropped the parameter once per call and forgot it straight away.
+        self._no_effort: set[str] = set()
 
     def complete(self, req: ModelRequest) -> ModelResponse:
         kwargs: dict[str, Any] = {
@@ -104,7 +109,7 @@ class AnthropicClient:
         output_config: dict[str, Any] = {}
         if req.schema is not None:
             output_config["format"] = {"type": "json_schema", "schema": req.schema}
-        if req.effort:
+        if req.effort and req.model not in self._no_effort:
             output_config["effort"] = req.effort
         if output_config:
             kwargs["output_config"] = output_config
@@ -113,8 +118,11 @@ class AnthropicClient:
         try:
             resp = self._call(kwargs)
         except self._anthropic.BadRequestError as exc:
-            # Older models may not accept `effort`; drop it once rather than fail the turn.
-            if req.effort and "effort" in str(exc).lower():
+            # Some models do not accept `effort`. Drop it, remember that for this model, and retry
+            # — so the refusal costs one wasted request per process, not one per call.
+            if "effort" in kwargs.get("output_config", {}) and "effort" in str(exc).lower():
+                self._no_effort.add(req.model)
+                log.info("%s does not accept effort; no longer sending it", req.model)
                 kwargs["output_config"].pop("effort", None)
                 if not kwargs["output_config"]:
                     kwargs.pop("output_config")

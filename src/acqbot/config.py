@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     comps_provider: str = "stub"
 
     # Business parameters (spec defaults; margin and transport are placeholders)
+    # Below this opening figure the automation does not make an offer at all — a person does, or
+    # declines. A placeholder for the dealership to set: under about $1,000 a private-sale car is
+    # usually a wrecker's proposition, and "$150, subject to inspection" insults the seller as
+    # surely as "$0" did.
+    min_offer_aud: int = 1000
     dedupe_window_days: int = 90
     high_value_threshold_aud: int = 60_000
     target_margin_pct: float = 0.10

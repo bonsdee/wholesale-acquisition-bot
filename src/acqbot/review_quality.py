@@ -35,6 +35,12 @@ MAX_REPEATS_OF_AN_OPENING = 2
 # are the". Take five and the tic hides behind whatever varies at word four.
 OPENING_WORDS = 3
 
+# ...but a single word is a tic too, and the three-word check cannot see it: "Good to hear…",
+# "Good to know…", "Good, thanks…" diverge at word two. The first live run opened four of nine
+# messages with "Good" and the three-word check reported nothing. Four is the line because the
+# scripted questions themselves open with "What's" three times.
+MIN_REPEATS_OF_A_FIRST_WORD = 4
+
 # Two messages sharing a whole sentence, word for word, is copy-paste — noticeable to anyone
 # reading their own thread back.
 MIN_WORDS_FOR_A_SENTENCE = 6
@@ -100,6 +106,19 @@ def repeated_wording(turns: Sequence[TurnLike]) -> list[Finding]:
         if n > MAX_REPEATS_OF_AN_OPENING:
             out.append(
                 Finding("repetition", f"opens {n} messages the same way", quote=f"“{key}…”")
+            )
+
+    firsts: dict[str, int] = {}
+    for t in written:
+        words = _normalise(t.body).split()
+        if words:
+            firsts[words[0]] = firsts.get(words[0], 0) + 1
+    flagged = {f.quote for f in out}
+    for word, n in sorted(firsts.items(), key=lambda kv: -kv[1]):
+        # Skip it when the three-word check already reported the same habit — one finding per tic.
+        if n >= MIN_REPEATS_OF_A_FIRST_WORD and not any(q.startswith(f"“{word} ") for q in flagged):
+            out.append(
+                Finding("repetition", f"starts {n} messages with the same word", quote=f"“{word}…”")
             )
 
     seen: dict[str, int] = {}
@@ -191,7 +210,33 @@ def _spec_for(field_key: str):
     return spec_for(field_key)
 
 
-CHECKS = (repeated_wording, stacked_questions, repeated_asking, length_drift)
+def lowercase(turns: Sequence[TurnLike]) -> list[Finding]:
+    """Sentences starting in lowercase, and a lowercase "i" standing alone.
+
+    Found by reading, not by any check: on the first full live run the model started 86 of 126
+    messages in lowercase — and lowercased the seller's own name — after being told not to open
+    with "Good". Nothing measured it, so the table called eleven of those conversations clean.
+    Two messages is the line: one could be a quote or a deliberate "ok"; two is a style."""
+    written = _model_written(turns)
+    low_start = [t for t in written if t.body[:1].isalpha() and t.body[:1].islower()]
+    bare_i = [t for t in written if re.search(r"(?<![\w'])i(?![\w'])|(?<![\w'])i'(?:m|ll|ve|d)\b", t.body)]
+    out: list[Finding] = []
+    if len(low_start) >= 2:
+        out.append(
+            Finding(
+                "capitalisation",
+                f"{len(low_start)} of {len(written)} messages start with a lowercase letter",
+                quote=low_start[0].body,
+            )
+        )
+    if bare_i:
+        out.append(
+            Finding("capitalisation", f'writes "i" in lowercase in {len(bare_i)} message(s)', quote=bare_i[0].body)
+        )
+    return out
+
+
+CHECKS = (repeated_wording, stacked_questions, repeated_asking, length_drift, lowercase)
 
 
 def findings(turns: Sequence[TurnLike]) -> list[Finding]:

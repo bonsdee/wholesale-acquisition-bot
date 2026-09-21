@@ -67,6 +67,21 @@ def ask_field(spec: FieldSpec, *, preface: str = "") -> str:
     return f"{preface}{spec.ask}".strip()
 
 
+# The acknowledgement before a scripted question, rotated by which question it is. It used to be
+# "Thanks. " every time, so a seller on the scripted fallback got it eight times in a row — the same
+# tic the prompt tells the model to avoid, found by the review's first-word check on 21 Sep. The
+# blanks are deliberate: often the best acknowledgement is none at all.
+ACKS: tuple[str, ...] = ("Thanks. ", "Got it. ", "", "Noted. ", "")
+
+
+def ack(field_key: str) -> str:
+    from acqbot.facts.fields import ASKED_NOT_GATING, DISCOVERY_REQUIRED
+
+    order = [f.key for f in (*DISCOVERY_REQUIRED, *ASKED_NOT_GATING)]
+    i = order.index(field_key) if field_key in order else 0
+    return ACKS[i % len(ACKS)]
+
+
 def clarify(spec: FieldSpec) -> str:
     if spec.choices:
         return f"Sorry, I didn't catch that. {spec.label} — {' / '.join(spec.choices)}?"

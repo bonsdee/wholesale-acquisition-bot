@@ -21,7 +21,14 @@ from acqbot.facts.fields import DISCOVERY_REQUIRED, spec_for
 from acqbot.llm.knowledge import process_notes
 from acqbot.llm.schemas import FIELD_WIRE
 
-PROMPT_VERSION = "prompt:v3"  # v3: the ladder released to the writer, one figure at a time (Phase 5)
+# v3: the ladder released to the writer, one figure at a time (Phase 5)
+# v4: first real-model run (21 Sep) — one question mark, varied openers, offer phrases quoted verbatim
+# v5: first full real run (21 Sep) — normal capitalisation (v4's quoted "Good" was dodged by writing
+#     it lowercase), the last two openers named per turn, "hostile" narrowed to abuse not impatience
+# v6: second live run (21 Sep) — offer instructions make no statement about limits; forbidden
+#     wording described rather than quoted, since the model copies what it is shown
+# v7: final live run (21 Sep) — the first offer is told the number is ready now (it stalled twice)
+PROMPT_VERSION = "prompt:v7"
 
 
 def _json(obj: Any) -> str:
@@ -54,8 +61,12 @@ Rules:
   consumer affairs, a dispute or threat of one), deceased_estate (the owner has died; estate,
   executor, probate), distress (financial or personal crisis, desperation), minor_or_no_authority
   (under 18, or not the owner / no authority to sell), human_question (asks whether they are
-  talking to a bot, a machine or a real person), hostile (abuse or anger at the assistant or the
-  dealership). Do not flag ordinary frustration or a hard bargain.
+  talking to a bot, a machine or a real person), hostile (abuse, threats, slurs or harassment
+  aimed at the assistant or the dealership — swearing AT someone, not merely swearing). Impatience
+  is NOT hostile: "about time", "can we speed this up", "why so many questions", a curt one-word
+  answer, sarcasm about how long this is taking. A blunt seller is still a seller and is still
+  selling — flagging them sends a willing lead to a queue. Do not flag frustration or a hard
+  bargain either.
 - counter_price_aud: a dollar amount the seller says they want or would accept; otherwise null.
 - phone: a phone number in the message; otherwise null.
 - seller_question: a question the seller asks the assistant, paraphrased in under 20 words;
@@ -119,16 +130,26 @@ Hard rules — a message that breaks one is rejected before it is sent:
   inspection.
 {urgency_rule}
 - Do not repeat the disclosure and do not introduce yourself again.
-- At most ONE question per message. When the instruction asks for a question, ask that one and no
-  other; when it does not, ask none.
+- At most ONE question per message, and so at most one question mark. When the instruction asks
+  for a question, ask that one, put it last, and add nothing after it — not a follow-up, not "any
+  X worth mentioning?". When the instruction does not ask for a question, ask none. A seller on a
+  phone answers the last question they read, and the first one is lost.
 - Never invent dealership process, timing, price or policy. If the seller asks something the
   process notes below do not cover, say {agent} will confirm it, then carry on.
 
 Tone: direct, unhurried, plain Australian English ("tyres", "rego", "km"). One to three short
 sentences — aim for under 300 characters and never exceed {max_length}. No emojis, no exclamation
-marks, no lists, no headings, no sign-offs. Don't over-thank and don't flatter. Write in sentence
-case: no capitalised words for emphasis. Vary your wording from turn to turn — a seller reading
-six near-identical messages notices.
+marks, no lists, no headings, no sign-offs. Don't over-thank and don't flatter.
+
+Capitalisation is normal written English: a capital letter at the start of every sentence, "I"
+always capitalised, and people's and place names capitalised. Never write in all lowercase. The
+only thing ruled out is a whole word in capitals for emphasis.
+
+Vary your wording from turn to turn — a seller reading six near-identical messages notices. Do
+not start a message with the same word as either of your last two, whatever its capitalisation;
+the turn notes below tell you which words those were. Acknowledge an answer only when it told you
+something worth reacting to; otherwise go straight to the question. Words like good, great,
+thanks and noted at the start of every message read as a script.
 
 What you may say about process:
 {process_notes}
@@ -237,8 +258,13 @@ def turn_context(
     channel: str,
     max_length: int,
     offer_amount: str | None = None,
+    avoid_openers: list[str] | None = None,
 ) -> str:
     """The per-turn block appended to the system prompt.
+
+    `avoid_openers` are the first words of the last two messages the assistant sent. A general rule
+    ("vary your wording") was ignored on the first live run — four of nine messages opened with
+    "Good" — so the specific words are named here, turn by turn, where they cannot be missed.
 
     Before PRICED the valuation is not here at all — there is no parameter for it, and a number the
     model does not hold cannot be leaked. From PRICED the model is given ONE figure: the amount it
@@ -269,7 +295,14 @@ def turn_context(
             )
         )
         + f"Instruction: {instruction}\n"
-        f"Seller's first name: {seller_first_name or 'unknown'} (use it rarely, never every message)\n"
+        + (
+            "Your last messages began with: "
+            + ", ".join(f'"{w}"' for w in avoid_openers)
+            + ". Begin this one with a different word.\n"
+            if avoid_openers
+            else ""
+        )
+        + f"Seller's first name: {seller_first_name or 'unknown'} (use it rarely, never every message)\n"
         f"Channel: {channel}; keep the message under {max_length} characters."
     )
 

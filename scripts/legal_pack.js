@@ -148,6 +148,8 @@ const body = [
   bullet("Promises to buy, guarantees anything, or describes the deal as done — the assistant has no authority to bind the dealership."),
   bullet("Mentions other buyers, competing offers, other dealers, or anyone else being interested."),
   bullet("Uses urgency language: act now, last chance, today only, limited time, don't miss out, now or never."),
+  bullet("Claims the figure is the best, final or highest available — \"the best I can do\", \"final offer\", \"can't go any higher\". The assistant never knows that: above its last authorised figure sits one only a person can approve. Added 21 September after the model said \"that's the best I can put forward\" in a test conversation with a higher figure still available."),
+  bullet("Says it cannot go further, or that going further is not its decision, while it still has a higher authorised figure in hand. At its last automated step that statement is true and is allowed; before it, it is refused. Added 21 September after the model told two test sellers it could not move beyond a figure — and then offered more in its next message."),
   bullet("States a year, an odometer reading, or a vehicle make that is not in the recorded facts for that car."),
   bullet("Omits the offer amount or the expiry, word for word, when presenting an offer."),
   bullet("Exceeds the character limit of the channel it is being sent on."),
@@ -173,12 +175,18 @@ const body = [
   p("The system asks for registration or VIN, runs a PPSR check, and stores the whole conversation permanently. No notice of collection is given to the seller at any point, and there is no link to a privacy policy in any message. We believe APP 5 requires one at or before the time of collection, and we have not drafted it because the wording should be counsel's. It would sit in the opening message at §3.1.", { run: { size: 21 } }),
 
   h2("6.2  Basis for sending the first SMS"),
-  p("The seller provides a mobile number when asked for one in the Messenger conversation. Whether that establishes consent for a commercial text — inferred or express — is question 4. If express consent is required, the assistant must ask for it in terms, and we would add the wording to the discovery sequence.", { run: { size: 21 } }),
+  p("The seller provides a mobile number when asked for one in the Messenger conversation. The reason given is:", { run: { size: 21 } }),
+  ...quote(["What's the best mobile for you? Messenger only lets us reply for a day after your last message, and I don't want the offer to have no way of reaching you."]),
+  note("An earlier version said \"Marketplace hides messages after a day or so\", which is not true — the limit is Meta's 24-hour window on business replies. It was corrected on 21 September after the first live run, because a false reason given to obtain someone's phone number is itself a collection concern."),
+  p("Whether providing the number in answer to this establishes consent for a commercial text — inferred or express — is question 4. If express consent is required, the assistant must ask for it in terms, and we would add the wording to the discovery sequence.", { run: { size: 21 } }),
 
   h2("6.3  How many conversations one named buyer can hold"),
   p("Several named buyers operate under the one dealership. A name holding an implausible number of simultaneous conversations invites the inference that it is not a person, which is the impression §5.1 exists to avoid. The system now spreads leads across the configured names and limits how many live conversations each holds. We would like counsel's view on whether the names must correspond to actual employees.", { run: { size: 21 } }),
 
-  h2("6.4  Retention"),
+  h2("6.4  Who the assistant says it is"),
+  p("The opening message says \"[BUYER NAME] here from [DEALERSHIP]\" and, in the next sentence, that \"this is an automated assistant\". Later messages refer to [BUYER NAME] in the third person, as the person who will book the inspection. A seller could reasonably read the opening as the assistant's own name, and the closing as a different, human [BUYER NAME]. We would like counsel's view on whether this is clear enough, or whether the opening should instead introduce the assistant as working for a named person — for example, \"[DEALERSHIP]'s automated assistant here, working with [BUYER NAME] from our buying team\".", { run: { size: 21 } }),
+
+  h2("6.5  Retention"),
   p("Conversations, offers, valuations and model calls are stored permanently and cannot be altered or deleted — deliberately, because the record is what demonstrates what was said. We have not set a retention period and would like advice on whether one is required and what it should be.", { run: { size: 21 } }),
 
   h1("7.  Inventory"),

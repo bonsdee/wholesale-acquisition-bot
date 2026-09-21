@@ -78,10 +78,12 @@ DISCOVERY_REQUIRED: tuple[FieldSpec, ...] = (
         why="Direct reconditioning cost line",
         kind="enum",
         choices=("excellent", "good", "fair", "poor"),
-        # One question, not two. Asked as two, a seller on a phone answers whichever they read last
-        # — usually the damage — and the grade that actually drives the recon estimate never
-        # arrives, so the bot has to ask again and reads as though it wasn't listening.
-        ask="How's the panel and paint — excellent, good, fair, or poor? Mention any dents or scratches while you're there.",
+        # One question and nothing that can be turned into a second. Asked as two, a seller on a
+        # phone answers whichever they read last — usually the damage — and the grade that drives
+        # the recon estimate never arrives. The softer "mention any dents while you're there" was
+        # no better: on the first live run the model turned it straight back into "Any dents or
+        # scratches worth mentioning?". Volunteered damage is still read by the extractor.
+        ask="How's the panel and paint — excellent, good, fair, or poor?",
     ),
     FieldSpec(
         key="mechanical_faults",
@@ -137,9 +139,13 @@ SELLER_PHONE = FieldSpec(
     label="Mobile number",
     why="Carries the conversation off Messenger when its 24-hour window shuts",
     kind="text",
+    # The reason given has to be the TRUE one. This used to say "Marketplace hides messages after
+    # a day or so", which it doesn't — the real limit is Meta's: a business may only reply for 24
+    # hours after the seller's last message. A false reason given to get someone's phone number is
+    # exactly what a privacy review (APP 3, collection by fair means) exists to catch.
     ask=(
-        "What's the best mobile for you? Marketplace hides messages after a day or so and I don't "
-        "want the offer sitting somewhere you won't see it."
+        "What's the best mobile for you? Messenger only lets us reply for a day after your last "
+        "message, and I don't want the offer to have no way of reaching you."
     ),
 )
 ASKED_NOT_GATING: tuple[FieldSpec, ...] = (SELLER_PHONE,)

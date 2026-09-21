@@ -194,6 +194,25 @@ def compute_valuation(session: Session, lead_id: uuid.UUID, *, persist: bool = T
                 {"finance_owing": v.finance_owing, "wholesale_max": result.wholesale_max},
             )
             escalated = "encumbered_above_offer"
+        # A figure too low to be an offer is not an offer. The engine has always WARNED "not
+        # viable" when wholesale_max fell to nothing — and nothing read the warning, so the offer
+        # path presented whatever came out. On both full live runs (21 Sep) a seller with a hail
+        # write-off, bald tyres and one key was offered "$0, subject to inspection", said "yes,
+        # deal", and a deal packet went to a person to book an inspection. The model did exactly
+        # what it was told; the gate required "$0" word for word. The fix belongs here, before
+        # any figure exists to present: a person decides what to say to this seller.
+        elif result.ladder.get("opening", 0) < get_settings().min_offer_aud:
+            escalate(
+                session,
+                lead,
+                "not_viable",
+                {
+                    "wholesale_max": result.wholesale_max,
+                    "opening": result.ladder.get("opening"),
+                    "min_offer_aud": get_settings().min_offer_aud,
+                },
+            )
+            escalated = "not_viable"
     return ValuationOutcome(row=row, result=result, basis=basis, escalated=escalated)
 
 

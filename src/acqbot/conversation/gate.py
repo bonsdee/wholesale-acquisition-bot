@@ -65,6 +65,50 @@ PRESSURE = re.compile(
     r"right now or|final warning|now or never|before it'?s too late)\b",
     re.I,
 )
+# A claim that this is the most on offer. The automation NEVER knows that: above its last authorised
+# concession sits a ceiling only a person can approve, so "the best I can do" is untrue every time
+# the model says it — and a seller told it, then offered more, has been misled (Section 1, ACL s18).
+# Phase 5 took exactly this out of the scripted concession; on the first full live run (21 Sep) the
+# model put it back — "that's the best i can put forward" at step_2 — and nothing stopped it.
+#
+# Deliberately narrow. "is as far as I can take it ON MY OWN" (the scripted ceiling message) and
+# "going higher isn't something I can decide" are true and must pass; only claims of a limit do not.
+FINALITY = re.compile(
+    r"\b(best (i|we) can (do|offer|manage|go|put forward|give)|"
+    r"(my|our|the) (best|final|top|highest) (offer|price|number|figure)|"
+    r"final (offer|number|price|figure)|"
+    r"(can'?t|cannot|can not) go (any )?(higher|further)|"
+    r"as good as it gets|take it or leave it|"
+    r"most (i|we)('ve| have)? got room for|(that'?s|this is) (my|our|the) limit|"
+    r"as high as (i|we) can go)\b",
+    re.I,
+)
+# A claim that there is no room to move — true at the automation's last step, false before it.
+# Found by reading the second live run (21 Sep): at the FIRST concession the model told two sellers
+# "it's not something I can move beyond that" and "that's not something I can move on" — and then
+# offered more one message later. The model cannot tell step_1 from step_2; this gate can, because
+# it holds the ladder and the figure being presented. Only enforced while more room exists.
+NO_ROOM = re.compile(
+    r"\b((can'?t|cannot|can not|unable to|not able to) (move|go|budge|shift|stretch)"
+    r"( it| the (price|number|figure|offer))?( any)? (further|higher|beyond|past|up)|"
+    r"not something (i|we) can (move|budge|shift|stretch|go|decide)|"
+    r"not (my|our) (call|decision)|"
+    r"(isn'?t|is not) (up to|for) (me|us)|"
+    r"no (more )?room (to move|left)|"
+    r"as (far|high) as (i|we) can (go|take it)|"
+    r"where (i|we) (have to |must )?stop)",
+    re.I,
+)
+
+
+def _more_room(ctx: GateContext) -> bool:
+    """Whether the automation itself still has a higher authorised step than the figure in play.
+
+    While it does, "I can't move beyond that" is false. At the last automated step (step_2) the
+    honest "going further isn't my decision" becomes true, and must be allowed through."""
+    if ctx.sole_figure is None or not ctx.ladder or "step_2" not in ctx.ladder:
+        return False
+    return int(round(ctx.sole_figure)) < int(round(ctx.ladder["step_2"]))
 ALLOWED_CAPS = {
     "LMCT",
     "PPSR",
@@ -192,6 +236,18 @@ def validate(body: str, ctx: GateContext) -> GateResult:
         v.append("reference to other buyers or competing offers")
     if PRESSURE.search(body):
         v.append("pressure language")
+    if FINALITY.search(body):
+        v.append(
+            "claims this is the best, final or highest figure — it is not known to be: a person may "
+            "still approve more, so say only that going further is not your decision"
+        )
+    # Neutral feedback on purpose: telling the model "there IS more room" would invite it to hint
+    # at it, which is misleading in the other direction.
+    elif _more_room(ctx) and NO_ROOM.search(body):
+        v.append(
+            "states a limit on the figure — make no statement about whether it can or cannot go "
+            "higher; just give the figure"
+        )
 
     years = {int(y) for y in YEAR_RE.findall(body)}
     ok_years = {ctx.today.year, ctx.today.year + 1}

@@ -100,6 +100,26 @@ def test_effort_rejected_by_an_older_model_is_dropped_once(monkeypatch):
     assert "effort" in calls[0]["output_config"] and "effort" not in calls[1]["output_config"]
 
 
+def test_a_model_that_refused_effort_is_never_sent_it_again(monkeypatch):
+    # The first live run: Haiku 4.5 refused `effort`, the client dropped it and retried — and then
+    # sent it again on the very next call. Every seller message cost two requests. The refusal
+    # should be paid for once per process, and a model that DOES accept it must keep getting it.
+    refusal = _status_error(
+        anthropic.BadRequestError, 400, "output_config.effort: Extra inputs are not permitted"
+    )
+    ok = _sdk_message('{"ok": true}')
+    client, calls = _client(monkeypatch, [refusal, ok, ok, ok, ok])
+
+    haiku = "claude-haiku-4-5-20251001"
+    client.complete(_req(model=haiku))  # refused, learned, retried: 2 requests
+    client.complete(_req(model=haiku))  # 1 request, no effort
+    client.complete(_req(model=haiku))  # 1 request, no effort
+    client.complete(_req(model="claude-sonnet-5"))  # a different model still gets effort
+
+    assert len(calls) == 5, "one wasted request in total, not one per call"
+    assert ["effort" in c["output_config"] for c in calls] == [True, False, False, False, True]
+
+
 def test_errors_map_to_retryable_or_not(monkeypatch):
     client, _ = _client(monkeypatch, [_status_error(anthropic.RateLimitError, 429, "slow down")])
     with pytest.raises(ModelError) as e:

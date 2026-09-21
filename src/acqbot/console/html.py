@@ -43,6 +43,11 @@ REASONS: dict[str, tuple[str, str]] = {
     ),
     "high_value": ("High-value vehicle", "Above the escalation threshold — check before proceeding."),
     "encumbered_above_offer": ("Finance exceeds the offer", "Settlement would cost more than the car."),
+    "not_viable": (
+        "No viable offer",
+        "The valuation came out below the minimum offer, so the bot has made none. The seller has "
+        "been told a number is coming — decide whether to make one yourself or decline politely.",
+    ),
     "template_failed_gate": ("System fault", "A scripted message failed its own validation gate."),
     "transport_rejected": ("Send failed", "The channel refused the message."),
 }

@@ -172,36 +172,99 @@ def verification_wait_instruction() -> str:
 # the model what the message has to DO; they are not what stops it inventing a number.
 
 
-def offer_instruction(*, amount: str, expiry: str, vehicle: str, first_offer: bool) -> str:
-    opening = (
-        f"This is the first offer on the {vehicle}. Lead with it — do not build up to it."
-        if first_offer
-        else "They pushed back and this is the improved number. Acknowledge the push in a few words, "
-        "then give it. Do not apologise for the earlier figure and do not say it is your last."
-    )
+def _recent_openers(messages: list[dict[str, Any]], n: int = 2) -> list[str]:
+    """The first word of each of the assistant's last `n` messages, lowercased and stripped.
+
+    Lowercased on purpose: on the first full live run the model dodged "don't open with Good" by
+    writing "good", so the comparison has to be blind to case."""
+    out: list[str] = []
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        text = content if isinstance(content, str) else ""
+        words = text.split()
+        if words:
+            out.append(words[0].strip(".,;:!?—–-\"'").lower())
+    return [w for w in out[-n:] if w]
+
+
+def _verbatim(amount: str, expiry: str) -> str:
+    """The two phrases the gate checks character for character, handed over as quotations.
+
+    Written inline ("open until exactly 2:46pm on Wednesday…") the model could not tell where our
+    instruction stopped and its copy began: on the first live run it wrote "open until exactly
+    2:46pm Wednesday 23 September" — keeping our "exactly", dropping the "on" — and the gate
+    rightly refused it. Quoted, the boundary is unambiguous."""
     return (
-        f"{opening} State the amount as exactly {amount} and say it is subject to inspection. "
-        f"Say plainly that it is open until exactly {expiry}, and that the valuation inputs move after "
-        f"that, which is why it lapses — this is true, so say it without drama. "
-        f"Close by asking whether they want to go ahead. No other figure, no range, no hint at what "
-        f"else might be possible, nothing about other buyers, and no deadline other than the one given."
+        f'Copy these two phrases into the message exactly as written, character for character, '
+        f'without the quotation marks: "{amount}" and "{expiry}". '
+    )
+
+
+def offer_instruction(*, amount: str, expiry: str, vehicle: str, first_offer: bool) -> str:
+    # The wording here is chosen so that nothing in it is worth copying. The first full live run
+    # showed the model lifting instruction phrases straight into the message: told "they pushed
+    # back and this is the improved number", it wrote "I've pushed on this… this is the improved
+    # number" — which also claims someone argued for the seller internally, and nobody did.
+    # Described, not quoted. Today's runs showed the model copying instruction phrases into its
+    # messages three times over, so the forbidden wording is not spelled out here for it to lift —
+    # the gate (FINALITY, NO_ROOM) is what actually refuses it.
+    no_process = (
+        "Say nothing about how the number was arrived at — do not describe anyone pushing for it, "
+        "checking it or going back to anyone, because none of that happened. "
+        # The second live run: at the first concession the model said it could not move beyond the
+        # figure — and then moved beyond it. It cannot know where the limit is.
+        "Make no statement about limits in either direction: not that more might be possible, not "
+        "that you cannot go further, not whose decision it is. Just give the figure. "
+    )
+    if first_offer:
+        # "The checks are done and the number is ready": the message before this one told the
+        # seller a number was coming shortly, and twice in three runs the model answered that with
+        # another stall ("still finalising the numbers — won't be long") instead of the offer.
+        return (
+            f"The checks are finished and the number is ready — present it in this message. This is "
+            f"the first offer on the {vehicle}. Lead with it — do not build up to it. "
+            f"{_verbatim(amount, expiry)}"
+            f"Say the amount is subject to inspection, and that the offer is open until that time — "
+            f"after which the valuation inputs move, which is why it lapses. This is true, so say it "
+            f"without drama. {no_process}Close by asking whether they want to go ahead. No other "
+            f"figure, no range, no hint at what else might be possible, nothing about other buyers, "
+            f"and no deadline other than the one given."
+        )
+    # A concession. They were told why an offer lapses with the first one; saying it again in every
+    # message is what made the first full run read as boilerplate, three times running.
+    # Not "there is a higher figure to give": the model turned that into "I do have a higher figure
+    # to offer", announcing the ladder to the seller.
+    return (
+        "The seller has asked for more. Acknowledge what they said in a few words of your own, then "
+        "give the figure below. "
+        f"{_verbatim(amount, expiry)}"
+        f"Say it is subject to inspection and open until that time. They have already been told why "
+        f"an offer lapses — do not explain it again. {no_process}Do not apologise for the earlier "
+        f"figure and do not say this one is the last. Close by asking whether they want to go ahead. "
+        f"No other figure, no range, no hint at more, nothing about other buyers."
     )
 
 
 def offer_restate_instruction(*, amount: str, expiry: str) -> str:
     return (
-        f"They asked about the price again. Restate the same offer — exactly {amount}, subject to "
-        f"inspection, open until exactly {expiry} — without treating the question as a negotiation and "
-        f"without re-explaining the whole thing. Short. Then ask if they want to go ahead."
+        f"They asked about the price again. Restate the same offer, subject to inspection. "
+        f"{_verbatim(amount, expiry)}"
+        f"Do not treat the question as a negotiation and do not re-explain the whole thing. Short. "
+        f"Then ask if they want to go ahead."
     )
 
 
 def at_ceiling_instruction(*, amount: str, agent: str) -> str:
+    # No "exactly {amount}" inline (the word leaked into the offer on the first live run) and no
+    # "automated ladder" (internal machinery a seller must never hear about).
     return (
-        f"They have countered again and the automated ladder is finished: exactly {amount} is as far as "
-        f"it goes without a person. Say the number stands, say honestly that going further is not yours "
-        f"to decide and {agent} will come back to them on it, and leave it there. Do not hint that more "
-        f"is available, do not promise more, do not ask them to counter again, and give no timeframe."
+        f'The seller wants more than you can offer. Your current figure, "{amount}", stands — copy it '
+        f"exactly, without the quotation marks. Say honestly that going higher is not your decision "
+        f"and that {agent} will come back to them on it, then leave it there. Do not call it your "
+        f"best, final or highest figure — it may not be. Do not hint that more is available, do not "
+        f"promise more, do not ask them to counter again, and give no timeframe."
     )
 
 
@@ -231,6 +294,7 @@ class Composer:
             return ComposeResult(body=directive.body, generator="template", model_version=T.TEMPLATE_VERSION)
 
         history = build_history(self.s, thread, lead, client=self.client, settings=self.cfg)
+        avoid_openers = _recent_openers(history.messages)
         # The one figure the writer is given, or none at all. `sole_figure` is set by the planner
         # only for an offer message, so the same flag that pins the gate also picks the prompt.
         offer_amount = T.fmt_money(directive.sole_figure) if directive.sole_figure is not None else None
@@ -250,6 +314,7 @@ class Composer:
             channel=channel,
             max_length=gate_ctx.max_length,
             offer_amount=offer_amount,
+            avoid_openers=avoid_openers,
         )
         messages = list(history.messages)
         notes: dict[str, Any] = {

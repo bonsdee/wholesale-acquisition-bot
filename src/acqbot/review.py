@@ -352,6 +352,7 @@ def _collect(review: ConversationReview, persona: Persona) -> None:
                 "step": o.ladder_step.value,
                 "amount": float(o.amount),
                 "outcome": o.outcome.value if o.outcome else None,
+                "presented_by": o.presented_by,
             }
             for o in s.scalars(select(Offer).where(Offer.lead_id == lead_id).order_by(Offer.presented_at))
         ]
@@ -389,6 +390,18 @@ def _collect(review: ConversationReview, persona: Persona) -> None:
         review.problems.append("reached HANDOFF with no deal packet")
     if turns == 0:
         review.problems.append("no state transitions recorded")
+    # An invariant, not a persona expectation: no conversation may put a figure below the minimum
+    # offer in front of a seller. Both full live runs on 21 Sep offered "$0, subject to
+    # inspection" and this report marked it ✅ — twice — because nothing here looked at the amount.
+    from acqbot.config import get_settings
+
+    floor = get_settings().min_offer_aud
+    for o in review.offers:
+        if o.get("amount") is not None and o["amount"] < floor and o.get("presented_by") == "system":
+            review.problems.append(
+                f"offered ${o['amount']:,.0f} — below the ${floor:,} minimum; this should have gone to a "
+                "person, not the seller"
+            )
     if persona.expect_max_questions and review.questions_asked > persona.expect_max_questions:
         review.problems.append(
             f"took {review.questions_asked} questions, expected at most {persona.expect_max_questions} "

@@ -70,7 +70,8 @@ def test_two_bad_drafts_fall_back_to_the_script():
     )
     say(console, client, seller_id, "200,600")
     m = last_outbound(lead_id)
-    assert m.body == "Thanks. Service history — full logbook, partial, or none?"
+    # The scripted acknowledgement rotates by question (see templates.ack); service history's is none.
+    assert m.body == "Service history — full logbook, partial, or none?"
     assert m.validation_notes["generator"] == "template_fallback"
     assert m.validation_notes["fallback"] == "ask:service_history"
     assert m.model_version == "template:v1" and m.validated is True

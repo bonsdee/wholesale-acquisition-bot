@@ -68,6 +68,28 @@ def test_conversation_facts_change_the_price(session):
     assert not any(c.startswith("expected_") for c in codes)
 
 
+def test_a_figure_too_low_to_be_an_offer_goes_to_a_person_not_the_seller(session, settings_env):
+    # Both full live runs on 21 Sep offered a seller "$0, subject to inspection" — and on "yes,
+    # deal" produced a deal packet. Whatever the engine computes, below the minimum there is no
+    # offer: a person decides what to say.
+    settings_env(min_offer_aud=10_000_000)  # above any figure the stubs can produce
+    lead_id = _enriched_lead(session, "clean", seed=74)
+    out = compute_valuation(session, lead_id)
+    session.commit()
+    assert out.escalated == "not_viable"
+    assert session.get(Lead, lead_id).state == LeadState.HUMAN
+    assert session.query(Escalation).filter_by(lead_id=lead_id, reason="not_viable").count() == 1
+
+
+def test_an_ordinary_figure_is_not_mistaken_for_a_non_viable_one(session, settings_env):
+    settings_env(min_offer_aud=1)
+    lead_id = _enriched_lead(session, "clean", seed=75)
+    out = compute_valuation(session, lead_id)
+    session.commit()
+    assert out.escalated is None
+    assert session.get(Lead, lead_id).state != LeadState.HUMAN
+
+
 def test_encumbrance_above_offer_escalates(session):
     lead_id = _enriched_lead(session, "encumbered", seed=73)
     record_fact(
