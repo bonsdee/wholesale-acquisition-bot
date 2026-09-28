@@ -52,6 +52,17 @@ def test_sentry_is_optional_and_silent_about_it(settings_env):
     assert init_sentry() is False  # no DSN, no SDK import, no complaint
 
 
+def test_doctor_fails_a_live_system_that_would_run_blind():
+    # Optional on a laptop; in production nobody would hear about a crash.
+    from acqbot.config import Settings
+    from acqbot.observability import error_tracking_check
+
+    assert error_tracking_check(Settings(environment="development", sentry_dsn="")).ok
+    assert not error_tracking_check(Settings(environment="production", sentry_dsn="")).ok
+    dsn = "https://k@o0.ingest.sentry.io/1"
+    assert error_tracking_check(Settings(environment="production", sentry_dsn=dsn)).ok
+
+
 # ------------------------------------------------------------------ the quiet failures
 
 

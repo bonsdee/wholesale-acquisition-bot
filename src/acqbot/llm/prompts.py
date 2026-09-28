@@ -31,7 +31,9 @@ from acqbot.llm.schemas import FIELD_WIRE
 # v8: Direct Auto (21 Sep) — process notes: business-hours reply, a person can explain the figure
 # v9: Direct Auto roster (21 Sep) — the assistant works WITH a named salesperson instead of being
 #     one (the names are now real people); the photo question names five shots
-PROMPT_VERSION = "prompt:v9"
+# v10: live run (28 Sep) — a concession's acknowledgement may not refuse to move (it read "can't
+#      move on it" then moved), and its closing question is worded differently from the last one
+PROMPT_VERSION = "prompt:v10"
 
 
 def _json(obj: Any) -> str:

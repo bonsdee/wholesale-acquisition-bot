@@ -66,12 +66,32 @@ def init_sentry(settings: Settings | None = None) -> bool:
     return True
 
 
+def error_tracking_check(settings: Settings | None = None) -> Check:
+    """Is anything going to hear about a crash? For `acqbot doctor`, not `/health`: a monitor
+    polling every minute gains nothing from being told about configuration.
+
+    Only production fails on it — a laptop running blind is fine; a live system running blind is
+    how a dead handler goes unnoticed for a week."""
+    cfg = settings or get_settings()
+    if cfg.sentry_dsn:
+        try:
+            import sentry_sdk  # noqa: F401
+        except ImportError:
+            return Check("error_tracking", False, "ACQBOT_SENTRY_DSN is set but sentry-sdk is not installed")
+        return Check("error_tracking", True, "Sentry configured")
+    if cfg.is_production:
+        return Check(
+            "error_tracking", False, "ACQBOT_SENTRY_DSN is unset — crashes go to the log and nowhere else"
+        )
+    return Check("error_tracking", True, "Sentry off (fine outside production)")
+
+
 def capture_exception(exc: BaseException, **context: Any) -> None:
     """Report a crash with the lead or job that caused it. Always logs, whether Sentry is on or not."""
     log.exception("%s: %s", type(exc).__name__, exc, extra={"acqbot": context})
     if _sentry is None:
         return
-    with _sentry.push_scope() as scope:
+    with _sentry.new_scope() as scope:  # push_scope is deprecated in 2.x and gone in 3.x
         for k, v in context.items():
             scope.set_tag(k, str(v)) if len(str(v)) < 200 else scope.set_extra(k, v)
         _sentry.capture_exception(exc)
@@ -81,7 +101,7 @@ def capture_message(message: str, *, level: str = "warning", **context: Any) -> 
     log.log(logging.ERROR if level == "error" else logging.WARNING, "%s %s", message, context or "")
     if _sentry is None:
         return
-    with _sentry.push_scope() as scope:
+    with _sentry.new_scope() as scope:
         for k, v in context.items():
             scope.set_extra(k, v)
         _sentry.capture_message(message, level=level)

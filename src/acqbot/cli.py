@@ -366,10 +366,11 @@ def doctor(
 ) -> None:
     """Check the things that fail quietly. Exit code 1 if anything is wrong."""
     from acqbot.db import session_scope
-    from acqbot.observability import checks
+    from acqbot.observability import checks, error_tracking_check
 
     with session_scope() as s:
         report = checks(s)
+    report.checks.append(error_tracking_check())
     for c in report.checks:
         if c.ok and not verbose:
             continue

@@ -235,13 +235,17 @@ def offer_instruction(*, amount: str, expiry: str, vehicle: str, first_offer: bo
     # message is what made the first full run read as boilerplate, three times running.
     # Not "there is a higher figure to give": the model turned that into "I do have a higher figure
     # to offer", announcing the ladder to the seller.
+    # The 28 Sep live run: the acknowledgement came out as a refusal ("it's not something I can
+    # move on") followed by a new figure in the same breath — a message that contradicts itself.
     return (
         "The seller has asked for more. Acknowledge what they said in a few words of your own, then "
-        "give the figure below. "
+        "give the figure below. The acknowledgement must not refuse, resist or say the figure can't "
+        "move — this message gives them a new one, so that would be untrue. "
         f"{_verbatim(amount, expiry)}"
         f"Say it is subject to inspection and open until that time. They have already been told why "
         f"an offer lapses — do not explain it again. {no_process}Do not apologise for the earlier "
-        f"figure and do not say this one is the last. Close by asking whether they want to go ahead. "
+        f"figure and do not say this one is the last. Close by asking whether they want to go ahead, "
+        f"worded differently from the last time you asked. "
         f"No other figure, no range, no hint at more, nothing about other buyers."
     )
 

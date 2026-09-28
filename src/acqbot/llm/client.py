@@ -16,6 +16,10 @@ from typing import Any, Protocol
 
 log = logging.getLogger("acqbot.llm")
 
+# Model families known not to accept `output_config.effort`. Seeding these means even the first
+# request of a process goes out without it; anything not listed is still learned from its 400.
+_NO_EFFORT_PREFIXES = ("claude-haiku-4-5",)
+
 
 @dataclass
 class ModelRequest:
@@ -109,7 +113,7 @@ class AnthropicClient:
         output_config: dict[str, Any] = {}
         if req.schema is not None:
             output_config["format"] = {"type": "json_schema", "schema": req.schema}
-        if req.effort and req.model not in self._no_effort:
+        if req.effort and not self._refuses_effort(req.model):
             output_config["effort"] = req.effort
         if output_config:
             kwargs["output_config"] = output_config
@@ -157,6 +161,9 @@ class AnthropicClient:
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
             latency_ms=latency_ms,
         )
+
+    def _refuses_effort(self, model: str) -> bool:
+        return model in self._no_effort or model.startswith(_NO_EFFORT_PREFIXES)
 
     def _call(self, kwargs: dict[str, Any]) -> Any:
         return self._client.messages.create(**kwargs)

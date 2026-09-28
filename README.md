@@ -515,14 +515,14 @@ number for two-way SMS.
 margin by segment, transport cost, high-value escalation threshold and the human response SLA.
 
 **Nothing yet watches it.** `/health` reports seven checks and `acqbot doctor` runs them by hand,
-but no uptime monitor is pointed at either and `ACQBOT_SENTRY_DSN` is unset, so crashes go to the
-log and nowhere else. See `docs/DEPLOY.md`.
+but no uptime monitor is pointed at either. Sentry is wired in and installed, but needs a project
+and `ACQBOT_SENTRY_DSN`; until then crashes go to the log and nowhere else, and `acqbot doctor`
+fails in production to say so. See `docs/DEPLOY.md`.
 
 **The prompts have not met a real seller.** Every model call is traced, the gate and the scripted
 fallback are exercised in tests, and the live smoke test passes against the API — but the wording
 has only been tested on scripted sellers. Run `acqbot chat --model anthropic` and read
-`model_calls` for a few dozen conversations before pointing it at Messenger. Error tracking
-(Sentry) is still to be added.
+`model_calls` for a few dozen conversations before pointing it at Messenger.
 
 **The process notes are placeholders.** `llm/knowledge.py` is the only source the model may answer
 process questions from (inspection, payment, pick-up). Until the business confirms them, the model

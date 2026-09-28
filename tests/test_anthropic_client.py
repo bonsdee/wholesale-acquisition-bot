@@ -110,14 +110,24 @@ def test_a_model_that_refused_effort_is_never_sent_it_again(monkeypatch):
     ok = _sdk_message('{"ok": true}')
     client, calls = _client(monkeypatch, [refusal, ok, ok, ok, ok])
 
-    haiku = "claude-haiku-4-5-20251001"
-    client.complete(_req(model=haiku))  # refused, learned, retried: 2 requests
-    client.complete(_req(model=haiku))  # 1 request, no effort
-    client.complete(_req(model=haiku))  # 1 request, no effort
+    older = "claude-some-older-model"  # not in the known list, so it has to be learned
+    client.complete(_req(model=older))  # refused, learned, retried: 2 requests
+    client.complete(_req(model=older))  # 1 request, no effort
+    client.complete(_req(model=older))  # 1 request, no effort
     client.complete(_req(model="claude-sonnet-5"))  # a different model still gets effort
 
     assert len(calls) == 5, "one wasted request in total, not one per call"
     assert ["effort" in c["output_config"] for c in calls] == [True, False, False, False, True]
+
+
+def test_haiku_is_never_sent_effort_not_even_the_first_time(monkeypatch):
+    # Every fresh process (each CLI command, each worker start) used to pay one 400 before learning.
+    ok = _sdk_message('{"ok": true}')
+    client, calls = _client(monkeypatch, [ok, ok])
+    client.complete(_req(model="claude-haiku-4-5-20251001"))
+    client.complete(_req(model="claude-sonnet-5"))
+    assert len(calls) == 2, "no wasted request"
+    assert ["effort" in c["output_config"] for c in calls] == [False, True]
 
 
 def test_errors_map_to_retryable_or_not(monkeypatch):
