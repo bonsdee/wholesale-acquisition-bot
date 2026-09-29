@@ -69,7 +69,7 @@ The API must be reachable over HTTPS at a stable hostname before any of these ca
 |---|---|---|
 | Upstream lead source | `POST https://<host>/leads` | HMAC-signed with `ACQBOT_LEAD_WEBHOOK_SECRET` |
 | Meta → your app → webhooks | `https://<host>/webhooks/messenger` | Verify token is `ACQBOT_MESSENGER_VERIFY_TOKEN`. Subscribe to `messages`, `messaging_referrals`, `messaging_postbacks` |
-| Twilio → your number → messaging | `https://<host>/webhooks/sms` | |
+| Twilio → your number → messaging | `https://<host>/webhooks/sms` | Every request is checked against Twilio's signature. Set `ACQBOT_TWILIO_WEBHOOK_URL` to exactly this URL, or every message is rejected with 403 |
 | Uptime monitor | `https://<host>/health` | 200 while serving, 503 when it cannot |
 
 ## The console is not public

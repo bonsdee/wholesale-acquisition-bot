@@ -97,7 +97,11 @@ class Settings(BaseSettings):
 
     # SMS (Stage 3 transport)
     twilio_account_sid: str = ""
-    twilio_auth_token: str = ""
+    twilio_auth_token: str = ""  # also verifies inbound webhooks; /webhooks/sms refuses all without it
+    # The exact public URL Twilio posts to (https://<host>/webhooks/sms). Twilio signs that URL, and
+    # behind a proxy or load balancer the app sees a different one (http, an internal host), which
+    # would fail every signature. Empty = use the URL as the app received it.
+    twilio_webhook_url: str = ""
     twilio_from_number: str = ""
 
     # Language model (Phase 4 — discovery only). Section 7.1: a small model extracts, a stronger one writes.

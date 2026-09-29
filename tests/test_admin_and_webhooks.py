@@ -8,8 +8,9 @@ from fastapi.testclient import TestClient
 from acqbot.api.app import create_app
 from acqbot.db import session_scope
 from acqbot.demo import run_demo
-from acqbot.models import Lead, LeadState, Message
+from acqbot.models import Job, Lead, LeadState, Message
 from acqbot.queue.worker import drain
+from acqbot.transport import sms
 from acqbot.transport.registry import reset_console_transport
 
 ADMIN = {"X-Admin-Token": "adm"}
@@ -170,6 +171,71 @@ def test_messenger_webhook_verify_and_inbound(client, monkeypatch):
         assert s.get(Lead, lead_id).state == LeadState.CONTACTED
         inbound = [m for m in s.query(Message).filter_by(lead_id=lead_id) if m.direction.value == "inbound"]
         assert len(inbound) == 1
+
+
+def _sms_jobs() -> list[Job]:
+    with session_scope() as s:
+        return s.query(Job).filter_by(kind="inbound_message").all()
+
+
+SMS_FORM = {"From": "+61412345678", "Body": "Yes, deal", "MessageSid": "SM1", "NumMedia": "0"}
+
+
+def test_twilio_signature_matches_twilios_published_example():
+    # The worked example from Twilio's own security documentation.
+    params = {
+        "CallSid": "CA1234567890ABCDE",
+        "Caller": "+12349013030",
+        "Digits": "1234",
+        "From": "+12349013030",
+        "To": "+18005551212",
+    }
+    url = "https://mycompany.com/myapp.php?foo=1&bar=2"
+    assert sms.twilio_signature("12345", url, params.items()) == "0/KCTR6DLpKmkAf8muzZqo1nDgQ="
+
+
+def test_sms_webhook_refuses_anything_twilio_did_not_sign(client, settings_env):
+    # Unsigned, a forged "Yes, deal" from any phone would be taken as a seller accepting an offer.
+    settings_env(twilio_auth_token="tok")
+    url = "http://testserver/webhooks/sms"
+    good = sms.twilio_signature("tok", url, SMS_FORM.items())
+
+    assert client.post("/webhooks/sms", data=SMS_FORM).status_code == 403  # no signature
+    bad = {sms.TWILIO_SIGNATURE_HEADER: sms.twilio_signature("wrong", url, SMS_FORM.items())}
+    assert client.post("/webhooks/sms", data=SMS_FORM, headers=bad).status_code == 403
+    tampered = {**SMS_FORM, "Body": "No thanks"}  # signed once, body swapped in transit
+    headers = {sms.TWILIO_SIGNATURE_HEADER: good}
+    assert client.post("/webhooks/sms", data=tampered, headers=headers).status_code == 403
+    assert _sms_jobs() == [], "a rejected request must not reach the queue"
+
+    r = client.post("/webhooks/sms", data=SMS_FORM, headers=headers)
+    assert r.status_code == 200 and "<Response>" in r.text
+    assert [j.payload["body"] for j in _sms_jobs()] == ["Yes, deal"]
+
+
+def test_sms_webhook_verifies_against_the_public_url_behind_a_proxy(client, settings_env):
+    # Twilio signs the URL it called; behind a proxy the app sees another one.
+    public = "https://acq.example.com/webhooks/sms"
+    settings_env(twilio_auth_token="tok", twilio_webhook_url=public)
+    as_seen = {
+        sms.TWILIO_SIGNATURE_HEADER: sms.twilio_signature(
+            "tok", "http://testserver/webhooks/sms", SMS_FORM.items()
+        )
+    }
+    as_signed = {sms.TWILIO_SIGNATURE_HEADER: sms.twilio_signature("tok", public, SMS_FORM.items())}
+    assert client.post("/webhooks/sms", data=SMS_FORM, headers=as_seen).status_code == 403
+    assert client.post("/webhooks/sms", data=SMS_FORM, headers=as_signed).status_code == 200
+
+
+def test_webhooks_without_their_secret_refuse_rather_than_skip_the_check(client, settings_env):
+    settings_env(twilio_auth_token="", messenger_app_secret="")
+    assert client.post("/webhooks/sms", data=SMS_FORM).status_code == 503
+    event = {
+        "object": "page",
+        "entry": [{"messaging": [{"sender": {"id": "p"}, "message": {"mid": "m", "text": "hi"}}]}],
+    }
+    assert client.post("/webhooks/messenger", json=event).status_code == 503
+    assert _sms_jobs() == []
 
 
 def test_unlinked_thread_is_listed_and_linkable(client, monkeypatch):

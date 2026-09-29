@@ -48,7 +48,11 @@ def messenger_verify(request: Request) -> PlainTextResponse:
 async def messenger_events(request: Request) -> dict:
     settings = get_settings()
     body = await request.body()
-    if settings.messenger_app_secret and not messenger.verify_signature(
+    # Fail closed: with no secret there is nothing to verify against, and an unverified event is
+    # indistinguishable from a forged seller message. It used to skip the check instead.
+    if not settings.messenger_app_secret:
+        raise HTTPException(status_code=503, detail="messenger is not configured")
+    if not messenger.verify_signature(
         settings.messenger_app_secret, body, request.headers.get("X-Hub-Signature-256")
     ):
         raise HTTPException(status_code=401, detail="bad signature")
@@ -62,8 +66,20 @@ async def messenger_events(request: Request) -> dict:
 
 @router.post("/sms")
 async def sms_events(request: Request) -> PlainTextResponse:
-    form = dict(await request.form())
-    msg = sms.parse_twilio_webhook(form)
+    settings = get_settings()
+    # Unsigned, this endpoint would take anyone's POST as a seller's reply: an accepted offer, a
+    # STOP, a claim that there is no finance owing. Nothing is parsed before the signature passes.
+    if not settings.twilio_auth_token:
+        raise HTTPException(status_code=503, detail="sms is not configured")
+    raw = await request.form()
+    params = [(k, v) for k, v in raw.multi_items() if isinstance(v, str)]
+    url = settings.twilio_webhook_url or str(request.url)
+    if not sms.verify_twilio_signature(
+        settings.twilio_auth_token, url, params, request.headers.get(sms.TWILIO_SIGNATURE_HEADER)
+    ):
+        log.warning("rejected /webhooks/sms with a bad signature (verified against %s)", url)
+        raise HTTPException(status_code=403, detail="bad signature")
+    msg = sms.parse_twilio_webhook(dict(params))
     if msg is None:
         raise HTTPException(status_code=400, detail="missing From")
     _enqueue_inbound(msg)

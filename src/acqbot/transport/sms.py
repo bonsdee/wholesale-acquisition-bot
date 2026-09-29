@@ -6,6 +6,10 @@ identification for Australian SMS is satisfied by the disclosure in the first me
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,6 +19,25 @@ from acqbot.models import Channel
 from acqbot.transport.protocol import InboundMessage, MessageReceipt, ThreadInfo, TransportError
 
 SMS_MAX_LENGTH = 1000  # keep well under Twilio's 1600-char concatenation limit
+TWILIO_SIGNATURE_HEADER = "X-Twilio-Signature"
+
+
+def twilio_signature(auth_token: str, url: str, params: Iterable[tuple[str, str]]) -> str:
+    """Twilio's request signature: base64(HMAC-SHA1(auth token, url + each name+value, sorted)).
+
+    Repeated names are sorted by value too, as Twilio documents. `url` must be the exact public
+    URL Twilio posted to, query string included — see `twilio_webhook_url` in config."""
+    data = url + "".join(k + v for k, v in sorted(params))
+    mac = hmac.new(auth_token.encode("utf-8"), data.encode("utf-8"), hashlib.sha1).digest()
+    return base64.b64encode(mac).decode("ascii")
+
+
+def verify_twilio_signature(
+    auth_token: str, url: str, params: Iterable[tuple[str, str]], header_value: str | None
+) -> bool:
+    if not header_value:
+        return False
+    return hmac.compare_digest(twilio_signature(auth_token, url, params), header_value)
 
 
 class TwilioSmsTransport:
