@@ -29,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from acqbot.config import Settings, get_settings
+from acqbot.contracts.lead import SellerV1
 from acqbot.conversation import compose as C
 from acqbot.conversation import templates as T
 from acqbot.conversation.compose import (
@@ -48,7 +49,7 @@ from acqbot.conversation.history import as_turns
 from acqbot.conversation.state import PRICE_VISIBLE_STATES, Signals, StageView, compute_stage
 from acqbot.conversation.transitions import create_task, escalate, transition
 from acqbot.enrichment import catalog
-from acqbot.facts.fields import SELLER_PHONE, STATED_CONFIDENCE, spec_for
+from acqbot.facts.fields import LISTING_CONFIDENCE, SELLER_PHONE, STATED_CONFIDENCE, spec_for
 from acqbot.facts.store import FactSheet, fact_sheet, record_fact
 from acqbot.ingestion.service import request_reenrichment
 from acqbot.llm.client import ModelClient
@@ -648,19 +649,29 @@ class Conversation:
         entry = catalog.find(sheet.get("make", ""), sheet.get("model", ""))
         first_spec = spec_for(view.outstanding[0]) if view.outstanding else None
         first_ask = first_spec.ask if first_spec else "Is it still available?"
+        by_sms = thread.channel == Channel.SMS
         body = T.opening(
             self.identity(lead),
             lead.upstream_payload.get("seller", {}).get("display_name", ""),
             sheet.get,
             first_ask,
             entry.variants if entry else (),
+            by_sms=by_sms,
         )
         asked = (
             "variant"
             if (not sheet.get("variant") and entry and len(entry.variants) >= 2)
             else (first_spec.key if first_spec else None)
         )
-        msg = self._send(lead, thread, body, "opening", asked_field=asked, stage=LeadState.NEW)
+        msg = self._send(
+            lead,
+            thread,
+            body,
+            "opening",
+            asked_field=asked,
+            stage=LeadState.NEW,
+            **({"by_sms": True} if by_sms else {}),  # a different wording hashes differently
+        )
         if msg is not None:
             transition(self.s, lead, LeadState.CONTACTED, "opening_sent", {"channel": thread.channel.value})
         return msg
@@ -1674,6 +1685,58 @@ def _conversation_for(session: Session, lead: Lead) -> tuple[Conversation, Threa
     return Conversation(session, get_transport(thread.channel)), thread
 
 
+def listing_phone(lead: Lead) -> str | None:
+    """The seller's number from the listing, in +61 form, or None. The contract normalised it at
+    ingestion; the stored payload is the raw one, so it is normalised again the same way."""
+    raw = (lead.upstream_payload or {}).get("seller", {}).get("phone")
+    if not raw:
+        return None
+    try:
+        return SellerV1(platform_id="-", display_name="-", phone=raw).phone
+    except ValueError:
+        return None
+
+
+def _start_on_sms(session: Session, lead: Lead) -> tuple[Conversation, Thread] | None:
+    """First contact by text, for a dealership with Twilio but no Messenger (first_contact=sms).
+
+    Nothing else in the conversation changes: the thread is an ordinary SMS thread, the seller's
+    reply finds it by number, and because their number is already on file the bot never asks for a
+    mobile — a question that, on SMS, would make no sense."""
+    from acqbot.transport.registry import get_transport
+
+    cfg = get_settings()
+    if cfg.first_contact != "sms":
+        return None
+    phone = listing_phone(lead)
+    if phone is None:
+        log.info("lead %s has no phone on the listing; it waits for a person", lead.lead_id)
+        return None
+    try:
+        transport = get_transport(Channel.SMS)
+    except RuntimeError as exc:
+        log.warning("first_contact=sms but SMS is not usable for lead %s: %s", lead.lead_id, exc)
+        return None
+    thread = session.scalars(
+        select(Thread).where(Thread.channel == Channel.SMS, Thread.external_id == phone)
+    ).first()
+    if thread is not None and thread.lead_id not in (None, lead.lead_id):
+        # One thread per number: this seller is already talking to us about another car. A second
+        # cold opening into that conversation would confuse both; a person decides.
+        create_task(session, lead, "sms_number_in_use", {"phone": phone, "other_lead": str(thread.lead_id)})
+        return None
+    if thread is None:
+        thread = Thread(channel=Channel.SMS, external_id=phone, lead_id=lead.lead_id)
+        session.add(thread)
+    else:
+        thread.lead_id = lead.lead_id  # they texted us before the lead arrived; it is theirs
+    session.flush()
+    record_fact(
+        session, lead.lead_id, "seller_phone", phone, source=FactSource.SELLER, confidence=LISTING_CONFIDENCE
+    )
+    return Conversation(session, transport), thread
+
+
 def register_handlers() -> None:
     from acqbot.queue.worker import job_handler
 
@@ -1690,7 +1753,7 @@ def register_handlers() -> None:
         lead = session.get(Lead, uuid.UUID(payload["lead_id"]))
         if lead is None or lead.state != LeadState.NEW or lead.enriched_at is None:
             return
-        pair = _conversation_for(session, lead)
+        pair = _conversation_for(session, lead) or _start_on_sms(session, lead)
         if pair is None:
             return
         conv, thread = pair

@@ -65,13 +65,30 @@ def disclosure(identity: Identity) -> str:
     )
 
 
+SMS_OPT_OUT = "Reply STOP any time and I'll leave you alone."
+
+
 def opening(
-    identity: Identity, seller_name: str, sheet_get, first_ask: str, variants: tuple[str, ...] = ()
+    identity: Identity,
+    seller_name: str,
+    sheet_get,
+    first_ask: str,
+    variants: tuple[str, ...] = (),
+    *,
+    by_sms: bool = False,
 ) -> str:
+    """`by_sms` is a cold text to the number on the listing: the seller never contacted us, so it
+    says where the number came from, and the Spam Act 2003 wants a way to stop it in the same
+    message. On Messenger the seller wrote first, from our own invite, and needs neither."""
     first = (seller_name or "").split(" ")[0] or "there"
     vehicle = _vehicle(sheet_get)
     if not sheet_get("variant") and len(variants) >= 2:
         first_ask = f"Is it the {variants[0]} or the {variants[1]}?"
+    if by_sms:
+        return (
+            f"Hi {first}, {disclosure(identity)}\n\nWe saw your {vehicle} listed for sale and we're "
+            f"interested. {first_ask}\n\n{SMS_OPT_OUT}"
+        )
     return f"Hi {first}, {disclosure(identity)}\n\nWe're interested in your {vehicle}. {first_ask}"
 
 
@@ -249,7 +266,7 @@ def sms_first_contact(identity: Identity) -> str:
     neither. The identification and the opt-out have to travel with the channel change."""
     return (
         f"{identity.dealership} (LMCT {identity.lmct}) here, carrying on our chat from Marketplace. "
-        f"Reply STOP any time and I'll leave you alone.\n\n"
+        f"{SMS_OPT_OUT}\n\n"
     )
 
 

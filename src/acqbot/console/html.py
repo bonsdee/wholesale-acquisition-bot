@@ -43,6 +43,11 @@ REASONS: dict[str, tuple[str, str]] = {
         "The 48 hours are up and the seller has been told. Re-offer or let it go.",
     ),
     "send_window_closed": ("Cannot message", "The 24-hour Messenger window has closed."),
+    "sms_number_in_use": (
+        "Seller already in a chat",
+        "The number on this listing is already talking to us about another car, so no text was sent. "
+        "Contact them yourself, or close the other lead first.",
+    ),
     "ceiling_approval": (
         "Ceiling needs your approval",
         "The automated steps are spent and the seller is still within the ceiling. Approve it or hold.",
@@ -113,6 +118,26 @@ def esc(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
+def photo_grid(urls: Any) -> str:
+    """Clickable thumbnails. Only http(s) links are rendered: a URL arrives from a webhook, and a
+    `javascript:` one in an href would run in a signed-in session. No referrer, so the photo host
+    never learns the console's address."""
+    safe = [
+        str(u) for u in (urls or []) if isinstance(u, str) and u.lower().startswith(("https://", "http://"))
+    ]
+    if not safe:
+        return ""
+    return (
+        '<div class="photos">'
+        + "".join(
+            f'<a href="{esc(u)}" target="_blank" rel="noopener noreferrer">'
+            f'<img src="{esc(u)}" alt="Photo {i}" loading="lazy" referrerpolicy="no-referrer"></a>'
+            for i, u in enumerate(safe, 1)
+        )
+        + "</div>"
+    )
+
+
 def money(amount: Any) -> str:
     try:
         return f"${float(amount):,.0f}"
@@ -144,17 +169,21 @@ def hours_since(when: datetime | None) -> float:
 
 STYLE = """
 :root {
-  --bg:#0f1216; --panel:#171b21; --line:#242c36; --dim:#79828e; --text:#e8eaed;
-  --soft:#9aa4b0; --accent:#d1603d; --ok:#6a9a78; --warn:#c9a227; --bad:#c05c4e;
+  /* Text colours are checked against WCAG AA (4.5:1) on every background here. --bad and --accent
+     stay as they were for borders and buttons; --bad-text and --link are the readable versions. */
+  --bg:#0f1216; --panel:#171b21; --line:#242c36; --dim:#8b949f; --text:#e8eaed;
+  --soft:#9aa4b0; --accent:#d1603d; --link:#e57a57; --ok:#6a9a78; --warn:#c9a227; --bad:#c05c4e;
+  --bad-text:#e5806f;
 }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 "IBM Plex Sans",system-ui,sans-serif; }
-a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
-header { border-bottom:1px solid var(--line); padding:14px 24px; display:flex; gap:20px; align-items:baseline;
-         position:sticky; top:0; background:var(--bg); z-index:5; }
+a { color:var(--link); text-decoration:none; } a:hover { text-decoration:underline; }
+header { border-bottom:1px solid var(--line); padding:14px 24px; display:flex; flex-wrap:wrap; gap:8px 20px;
+         align-items:baseline; position:sticky; top:0; background:var(--bg); z-index:5; }
 header h1 { font-size:16px; margin:0; letter-spacing:-.01em; }
-header nav { display:flex; gap:16px; font-size:14px; } header .spacer { flex:1; }
+header nav { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:14px; } header .spacer { flex:1; }
 main { padding:24px; max-width:1100px; margin:0 auto; }
+h1.page { font-size:22px; margin:0; letter-spacing:-.01em; font-weight:600; }
 h2 { font-size:14px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); margin:28px 0 12px; font-weight:600; }
 h2:first-child { margin-top:0; }
 .card { background:var(--panel); border:1px solid var(--line); border-left:2px solid var(--line); padding:14px 18px; margin-bottom:10px; }
@@ -168,14 +197,23 @@ h2:first-child { margin-top:0; }
        color:var(--dim); white-space:nowrap; }
 .tag.stopped { color:var(--accent); border-color:var(--accent); }
 .tag.running { color:var(--ok); border-color:var(--ok); }
-.tag.late { color:var(--bad); border-color:var(--bad); }
+.tag.late { color:var(--bad-text); border-color:var(--bad); }
+.meta.late { color:var(--bad-text); font-weight:600; }
 table { width:100%; border-collapse:collapse; font-size:14px; }
-td,th { text-align:left; padding:7px 10px 7px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+/* break-word, not anywhere: "anywhere" lets a narrow column split ordinary words ("syst/em"). */
+td,th { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top;
+        overflow-wrap:break-word; }
 th { color:var(--dim); font-weight:500; font-size:13px; }
+tbody tr:nth-child(even) { background:#141820; } tbody tr:hover { background:#1b2029; }
+th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .msg { margin:0 0 10px; padding:10px 14px; border:1px solid var(--line); background:#13171c; }
 .msg.out { border-left:2px solid var(--ok); } .msg.in { border-left:2px solid var(--dim); }
-.msg .who { font-size:12px; color:var(--dim); margin-bottom:4px; display:flex; gap:10px; }
-.msg p { margin:0; white-space:pre-wrap; }
+.msg .who { font-size:12px; color:var(--dim); margin-bottom:4px; display:flex; flex-wrap:wrap; gap:4px 10px; }
+.msg p { margin:0; white-space:pre-wrap; overflow-wrap:break-word; }
+.photos { display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 12px; }
+.photos img { width:132px; height:99px; object-fit:cover; border:1px solid var(--line); display:block; background:#0d1014; }
+.photos a:hover img { border-color:var(--link); }
+.msg .photos { margin:8px 0 0; }
 form.inline { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0; }
 input,select,button,textarea { font:inherit; background:#0d1014; color:var(--text); border:1px solid var(--line);
        padding:7px 10px; border-radius:0; }
@@ -186,7 +224,7 @@ button:hover { filter:brightness(1.08); }
 label { color:var(--soft); font-size:14px; display:inline-flex; gap:6px; align-items:center; }
 .empty { color:var(--dim); padding:18px 0; }
 .flash { border:1px solid var(--ok); color:var(--ok); padding:10px 14px; margin-bottom:16px; background:#131a15; }
-.flash.bad { border-color:var(--bad); color:var(--bad); background:#1a1413; }
+.flash.bad { border-color:var(--bad); color:var(--bad-text); background:#1a1413; }
 .ladder { display:flex; gap:10px; flex-wrap:wrap; }
 .ladder div { border:1px solid var(--line); padding:8px 12px; font-family:"IBM Plex Mono",monospace; font-size:13px; }
 .ladder div b { display:block; font-size:16px; color:var(--text); font-family:"IBM Plex Sans",sans-serif; }
@@ -201,7 +239,14 @@ label { color:var(--soft); font-size:14px; display:inline-flex; gap:6px; align-i
 textarea { width:100%; min-height:70px; }
 .copy { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; white-space:pre-wrap; user-select:all;
         border:1px dashed var(--line); padding:10px 12px; margin:8px 0; }
-.errors { border:1px solid var(--bad); color:var(--bad); padding:10px 14px; margin-bottom:12px; background:#1a1413; }
+.errors { border:1px solid var(--bad); color:var(--bad-text); padding:10px 14px; margin-bottom:12px; background:#1a1413; }
+@media (max-width:640px) {
+  header, main { padding-left:16px; padding-right:16px; }
+  .card { padding:12px 14px; }
+  td, th { padding:7px 6px; font-size:13px; }
+  /* A table that still does not fit scrolls sideways instead of running off the screen. */
+  table { display:block; overflow-x:auto; }
+}
 .errors li { margin-left:18px; }
 footer { color:var(--dim); font-size:13px; padding:28px 24px; max-width:1100px; margin:0 auto; border-top:1px solid var(--line); }
 """

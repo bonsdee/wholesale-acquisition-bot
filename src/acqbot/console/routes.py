@@ -40,6 +40,7 @@ from acqbot.console.html import (
     login_page,
     money,
     page,
+    photo_grid,
     reason_text,
 )
 from acqbot.contracts import LeadContractError
@@ -225,7 +226,8 @@ def _queue(request: Request) -> str:
                 f'<span class="tag {"stopped" if stopped else "" if closed else "running"}">'
                 f"{'automation stopped' if stopped else 'conversation closed' if closed else 'bot still talking'}"
                 f"</span>"
-                f'<span class="tag{" late" if late else ""}">{esc(ago(e.at))}</span>'
+                # A time, not a status: plain text, so it doesn't read as a second pill.
+                f'<span class="meta{" late" if late else ""}">{esc(ago(e.at))}</span>'
                 f"</div>"
                 f'<div class="row" style="margin-top:8px">'
                 f'<div class="grow sub">{esc(_lead_line(lead))} · '
@@ -235,7 +237,14 @@ def _queue(request: Request) -> str:
     body = ["<h2>Needs a person</h2>"]
     body.append("".join(rows) if rows else '<p class="empty">Nothing waiting. The queue is clear.</p>')
     if waiting_rows:
-        body.append(f"<h2>Waiting for the seller to tap the link</h2>{waiting_rows}")
+        # In SMS mode a lead only waits here when it could not be texted: no mobile on the listing,
+        # or the number is already in another chat.
+        heading = (
+            "Not contacted yet — no text could be sent"
+            if cfg.first_contact == "sms"
+            else "Waiting for the seller to tap the link"
+        )
+        body.append(f"<h2>{heading}</h2>{waiting_rows}")
     extra = []
     if waiting_packets:
         extra.append(f'<a href="/console/handoffs">{waiting_packets} deal packet(s) awaiting a closer</a>')
@@ -604,13 +613,20 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
         vin_on_file = sheet.get("vin") or ""
         rego_on_file = sheet.get("rego") or ""
         car_words = T._vehicle(sheet.get) or vehicle
+        listing_url = lead.listing_url or ""
 
     out: list[str] = []
+    # Back to the live listing: is it still up, what are they asking now, what do the photos show.
+    listing = (
+        f' · <a href="{esc(listing_url)}" target="_blank" rel="noopener noreferrer">Open listing ↗</a>'
+        if listing_url.lower().startswith(("https://", "http://"))
+        else ""
+    )
     out.append(
-        f'<div class="row"><div class="grow"><h2 style="margin:0">{esc(vehicle)}</h2>'
+        f'<div class="row"><div class="grow"><h1 class="page">{esc(vehicle)}</h1>'
         f'<p class="sub">{esc(seller)} · <span class="meta">{esc(state)}</span>'
         + (f" · waiting on <b>{esc(waiting_for)}</b>" if waiting_for else "")
-        + f" · {calls} model call(s)</p></div></div>"
+        + f" · {calls} model call(s){listing}</p></div></div>"
     )
 
     if not_started:
@@ -685,14 +701,15 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
     if offers:
         rows = "".join(
             f"<tr><td>{esc(LADDER_LABEL.get(o.ladder_step.value, o.ladder_step.value))}</td>"
-            f"<td>{money(o.amount)}</td>"
+            f"<td class='num'>{money(o.amount)}</td>"
             f"<td>{esc(o.presented_by)}</td><td>{esc(o.outcome.value if o.outcome else 'open')}</td>"
             f"<td class='meta'>{esc(ago(o.presented_at))}</td></tr>"
             for o in offers
         )
         out.append(
-            "<h2>Offers</h2><table><tr><th>Step</th><th>Amount</th><th>By</th><th>Outcome</th>"
-            f"<th>Presented</th></tr>{rows}</table>"
+            '<h2>Offers</h2><table><thead><tr><th scope="col">Step</th>'
+            '<th scope="col" class="num">Amount</th><th scope="col">By</th><th scope="col">Outcome</th>'
+            f'<th scope="col">Presented</th></tr></thead><tbody>{rows}</tbody></table>'
         )
 
     if released and manual_val and state in {"PRICED", "OFFER_MADE", "NEGOTIATING", "HUMAN"}:
@@ -740,6 +757,16 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
             f"</form></div>"
         )
 
+    # --- photos: the odometer check is "read it off the dash photo", so the photo has to be here ---
+    seller_photos = photo_grid(confirmed.get("photos") or claimed.get("photos"))
+    listing_photos = photo_grid(confirmed.get("listing_images") or claimed.get("listing_images"))
+    if seller_photos or listing_photos:
+        out.append("<h2>Photos</h2>")
+        if seller_photos:
+            out.append(f'<p class="sub">From the seller — click to open full size.</p>{seller_photos}')
+        if listing_photos:
+            out.append(f'<p class="sub">From the listing.</p>{listing_photos}')
+
     # --- facts ---
     out.append("<h2>What we know</h2>")
     hide = {"listing_images", "photos", "seller_notes", "deferred_fields", "contradictions_acknowledged"}
@@ -757,9 +784,12 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
 
     verified_rows = _rows(confirmed)
     claimed_rows = _rows(claimed)
+    none = "<tr><td colspan=2>—</td></tr>"
     out.append(
-        f"<table><tr><th>Verified</th><th></th></tr>{verified_rows or '<tr><td colspan=2>—</td></tr>'}"
-        f"<tr><th>Seller's word only</th><th></th></tr>{claimed_rows or '<tr><td colspan=2>—</td></tr>'}</table>"
+        '<table><thead><tr><th scope="col">Fact</th><th scope="col">Value</th></tr></thead>'
+        f'<tbody><tr><th scope="rowgroup" colspan="2">Verified</th></tr>{verified_rows or none}</tbody>'
+        f'<tbody><tr><th scope="rowgroup" colspan="2">Seller\'s word only</th></tr>{claimed_rows or none}</tbody>'
+        "</table>"
     )
     out.append(
         f'<div class="card" style="margin-top:12px">'
@@ -790,7 +820,8 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
         inbound = m["direction"] == "inbound"
         who = "Seller" if inbound else "Us"
         tag = "" if inbound else f" · {esc(m.get('model_version'))}"
-        body_text = m["body"] or (f"[{len(m.get('attachments') or [])} photos]")
+        pics = photo_grid([a.get("url") for a in (m.get("attachments") or []) if isinstance(a, dict)])
+        body_text = m["body"] or ("" if pics else f"[{len(m.get('attachments') or [])} photos]")
         # Mark the point the conversation changed channel, so a closer reading this can see that
         # the last four messages were texts, not Messenger.
         if m.get("channel") and m["channel"] != channel_so_far:
@@ -800,7 +831,8 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
         out.append(
             f'<div class="msg {"in" if inbound else "out"}">'
             f'<div class="who"><span>{who}</span><span class="meta">{esc(ago(_dt(m["at"])))}{tag}</span></div>'
-            f"<p>{esc(body_text)}</p></div>"
+            + (f"<p>{esc(body_text)}</p>" if body_text else "")
+            + f"{pics}</div>"
         )
     return HTMLResponse(_page(vehicle, "".join(out), request))
 

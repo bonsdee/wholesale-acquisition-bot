@@ -206,3 +206,29 @@ def test_seller_text_is_escaped_not_executed(signed_in):
     # Nothing in the page body may contain an unescaped angle bracket from data we did not write.
     body = page.split("<main>", 1)[1]
     assert not re.search(r"<script(?!>)", body)
+
+
+def test_photos_are_shown_so_the_odometer_can_be_read_off_them(signed_in):
+    # The verification task says "read it off the dash photo"; the page used to print "[8 photos]".
+    run = run_demo("clean", "accept", seed=42, human_presents=True)
+    page = signed_in.get(f"/console/leads/{run.lead_id}").text
+    assert f"https://example.invalid/photo/{run.lead_id}/0.jpg" in page
+    assert page.count('<div class="photos">') >= 2  # the photo section and the message they came in
+    assert "[8 photos]" not in page
+    assert 'referrerpolicy="no-referrer"' in page
+
+
+def test_listing_link_and_page_title(signed_in):
+    run = run_demo("clean", "accept", seed=42, human_presents=True)
+    page = signed_in.get(f"/console/leads/{run.lead_id}").text
+    assert '<h1 class="page">' in page
+    assert re.search(r'href="https://www\.facebook\.com/marketplace/item/\d+/"[^>]*>Open listing', page)
+
+
+def test_only_web_links_become_photos():
+    from acqbot.console.html import photo_grid
+
+    out = photo_grid(["javascript:alert(1)", "data:image/png;base64,xx", 'https://ok.example/a.jpg?x="><b>'])
+    assert "javascript" not in out and "data:" not in out
+    assert "https://ok.example/a.jpg?x=&quot;&gt;&lt;b&gt;" in out  # escaped, not injected
+    assert photo_grid([]) == "" and photo_grid(None) == ""

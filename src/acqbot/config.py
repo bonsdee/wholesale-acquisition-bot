@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     # would fail every signature. Empty = use the URL as the app received it.
     twilio_webhook_url: str = ""
     twilio_from_number: str = ""
+    # Who speaks first. "messenger": wait for the seller to message the Page from the m.me invite
+    # (Section 4.2 Stage 1). "sms": text the seller first on the number in their listing — for a
+    # dealership with Twilio but no Messenger access. A lead without a phone waits either way.
+    first_contact: str = "messenger"
 
     # Language model (Phase 4 — discovery only). Section 7.1: a small model extracts, a stronger one writes.
     #   llm_provider: "auto" → anthropic when an API key is set, otherwise off (scripted templates)
@@ -160,6 +164,14 @@ class Settings(BaseSettings):
         v = v.strip().lower()
         if v not in {"auto", "anthropic", "fake", "off"}:
             raise ValueError("llm_provider must be one of auto, anthropic, fake, off")
+        return v
+
+    @field_validator("first_contact")
+    @classmethod
+    def _known_first_contact(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"messenger", "sms"}:
+            raise ValueError("first_contact must be messenger or sms")
         return v
 
     @field_validator("llm_effort")
