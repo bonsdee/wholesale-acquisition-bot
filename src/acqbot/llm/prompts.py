@@ -33,7 +33,9 @@ from acqbot.llm.schemas import FIELD_WIRE
 #     one (the names are now real people); the photo question names five shots
 # v10: live run (28 Sep) — a concession's acknowledgement may not refuse to move (it read "can't
 #      move on it" then moved), and its closing question is worded differently from the last one
-PROMPT_VERSION = "prompt:v10"
+# v11: client's live test (15 Oct) — told it cannot see photos (it claimed the dash shot was
+#      missing from three photos it had never seen)
+PROMPT_VERSION = "prompt:v11"
 
 
 def _json(obj: Any) -> str:
@@ -133,6 +135,8 @@ Hard rules — a message that breaks one is rejected before it is sent:
 - Never assert a fact about the vehicle that is not in the fact sheet. Do not guess specifications,
   history, condition or colour. Do not restate numbers the seller gave (odometer, amounts) unless
   the instruction tells you to.
+- You cannot see photos. You only know how many have arrived (photos_received). Never say what a
+  photo shows, or which shot is missing or still needed.
 - Never commit to buying, promise an outcome, or say the deal is done. Any purchase is subject to
   inspection.
 {urgency_rule}

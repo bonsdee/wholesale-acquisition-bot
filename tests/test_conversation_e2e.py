@@ -140,7 +140,7 @@ def test_no_identifiers_asks_for_rego_first_and_runs_ppsr_later():
     run = run_demo("no-identifiers", "accept", seed=3, human_presents=False)
     assert run.final_state == "HANDOFF"
     opening = run.transcript[1]["body"]
-    assert "rego plate" in opening
+    assert "rego number" in opening
     assert run.handoff["ppsr"]["checked_at"]  # PPSR ran once the rego resolved to a VIN
 
 

@@ -151,8 +151,10 @@ def contradiction_instruction(field_key: str, claimed: Any, actual: Any, source:
 
 def photos_partial_instruction(have: int, need: int) -> str:
     return (
-        f"They sent {have} photo{'s' if have != 1 else ''}. The dealership needs {photos_needed(need)}. "
-        "Thank them briefly and ask for the rest."
+        f"{have} of the {need} photos have arrived. You cannot see them and do not know which shots they "
+        "are, so never say or guess what they show or which one is missing. Thank them briefly, say you "
+        f"have {have} of {need}, and ask for {need - have} more, giving the full set ({photos_needed(need)}) "
+        "so they can send whichever they haven't yet."
     )
 
 

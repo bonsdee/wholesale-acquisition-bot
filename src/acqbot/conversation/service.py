@@ -1119,9 +1119,9 @@ class Conversation:
             sheet=sheet,
             outstanding=view.outstanding if view else [],
             identity=self.identity(lead),
-            seller_first_name=(lead.upstream_payload.get("seller", {}).get("display_name") or "").split(" ")[
-                0
-            ],
+            seller_first_name=T.first_name(name)
+            if (name := lead.upstream_payload.get("seller", {}).get("display_name"))
+            else "",
             channel=thread.channel.value,
             gate_ctx=gate_ctx,
         )

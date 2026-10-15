@@ -37,7 +37,10 @@ def test_the_question_names_the_shots_and_no_count():
 
 
 def test_the_chase_up_counts_exactly_what_it_lists():
-    assert T.photos_partial(3, 5) == f"Got 3 — could you send the rest? I need 5 in total: {FIVE}."
+    assert (
+        T.photos_partial(3, 5)
+        == f"Thanks, got 3 of 5. Could you send 2 more? We need 5 in total: {FIVE} — whichever you haven't sent yet."
+    )
 
 
 def test_another_minimum_turns_the_list_into_a_guide_rather_than_miscounting_it():
@@ -91,7 +94,10 @@ def test_three_photos_are_chased_for_two_more_and_five_move_the_seller_on():
     say("Here's a few", attachments=[shot(i) for i in range(3)])
     template, body = _outbound_bodies(lead_id)[-1]
     assert template == "photos_partial"
-    assert body == f"Got 3 — could you send the rest? I need 5 in total: {FIVE}."
+    assert (
+        body
+        == f"Thanks, got 3 of 5. Could you send 2 more? We need 5 in total: {FIVE} — whichever you haven't sent yet."
+    )
 
     say("And the rest", attachments=[shot(i) for i in range(3, 5)])
     with session_scope() as s:
@@ -99,3 +105,10 @@ def test_three_photos_are_chased_for_two_more_and_five_move_the_seller_on():
     assert _asked_field(lead_id) != "photos"  # five is enough: discovery is done with photos
     assert _state(lead_id) in {"VERIFICATION", "PRICED", "DISCOVERY"}
     assert not any(t == "photos_partial" for t, _ in _outbound_bodies(lead_id)[-1:])
+
+
+def test_the_writer_is_told_it_cannot_see_the_photos_so_never_names_a_missing_shot():
+    # Client's live test (15 Oct): told "we still need the dash shot" about photos it never saw.
+    note = photos_partial_instruction(3, 5)
+    assert "cannot see them" in note and "never say or guess" in note
+    assert "3 of 5" in note and "ask for 2 more" in note

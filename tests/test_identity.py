@@ -28,11 +28,11 @@ def test_the_opening_speaks_for_the_salesperson_not_as_them():
         IDENTITY, "Sam Lee", {"year": 2019, "make": "Toyota", "model": "RAV4"}.get, "What's the rego?"
     )
     assert body.startswith(
-        "Hi Sam, this is the automated assistant for Direct Auto (LMCT 0013130). I'm working with Vikram "
-        "from our team, and you can ask for a person at any point."
+        "Hi Sam, it's Direct Auto (LMCT 0013130). We're interested in buying your 2019 Toyota RAV4.\n\n"
+        "I'm an automated assistant working with Vikram from our team, and you can ask for a person anytime."
     )
     assert "Vikram here" not in body
-    assert body.endswith("We're interested in your 2019 Toyota RAV4. What's the rego?")
+    assert body.endswith("\n\nWhat's the rego?")
 
 
 def test_the_writer_is_told_it_works_with_the_salesperson_and_never_writes_as_them():
@@ -58,10 +58,17 @@ def test_names_are_trimmed_and_deduplicated():
 def test_the_seller_hears_one_name_from_the_first_message_to_the_handover():
     run = run_demo("clean", "accept", seed=21, human_presents=False)
     opening = next(m["body"] for m in run.transcript if m["direction"] == "outbound")
-    named = [n for n in ROSTER if f"I'm working with {n} from our team" in opening]
+    named = [n for n in ROSTER if f"working with {n} from our team" in opening]
     assert len(named) == 1, opening
     others = set(ROSTER) - set(named)
     outbound = [m["body"] or "" for m in run.transcript if m["direction"] == "outbound"]
     assert not any(n in body for body in outbound for n in others)
     assert run.final_state == "HANDOFF"
     assert f"{named[0]} will be in touch" in outbound[-1]
+
+
+@pytest.mark.parametrize(
+    ("given", "shown"), [("mobin", "Mobin"), ("MOBIN", "Mobin"), ("McKenzie Rae", "McKenzie"), ("", "there")]
+)
+def test_the_seller_is_greeted_by_name_as_a_person_would_write_it(given, shown):
+    assert T.first_name(given) == shown

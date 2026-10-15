@@ -55,7 +55,7 @@ DISCOVERY_REQUIRED: tuple[FieldSpec, ...] = (
         why="Unlocks the PPSR and rego checks — nothing can be priced without an identifier",
         kind="text",
         min_confidence=STATED_CONFIDENCE,
-        ask="What's the rego plate? (Or the VIN if it's handy — it's on the windscreen and the compliance plate.)",
+        ask="What's the rego number?",
     ),
     FieldSpec(
         key="odometer_km",

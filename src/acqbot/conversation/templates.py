@@ -34,6 +34,15 @@ def _vehicle(sheet_get) -> str:
     return " ".join(b for b in bits if b).strip()
 
 
+def first_name(display_name: str | None) -> str:
+    """The seller's first name as a person would write it: "mobin" and "MOBIN" become "Mobin";
+    a name with its own capitals ("McKenzie") is left alone."""
+    first = (display_name or "").split(" ")[0]
+    if first.islower() or first.isupper():
+        first = first.capitalize()
+    return first or "there"
+
+
 def fmt_money(amount: float | int) -> str:
     return f"${int(round(float(amount))):,}"
 
@@ -47,8 +56,8 @@ def fmt_expiry(expires_at: datetime, tz: str) -> str:
 
 
 def disclosure(identity: Identity) -> str:
-    """Who is speaking, in the first breath: the assistant, the licensed dealership it belongs to,
-    and the real person it works with.
+    """That an automated assistant is speaking, and the real person it works with. The opening
+    names the licensed dealership just before it.
 
     It used to open "{agent} here from {dealership}" and disclose the automation a sentence later.
     That was tolerable while the name was a placeholder; once the names became Direct Auto's own
@@ -60,12 +69,12 @@ def disclosure(identity: Identity) -> str:
     Mon–Sat business hours, whose own site promises a call "within one business day". What IS true
     at every hour is that the seller can ask, and the bot hands over."""
     return (
-        f"this is the automated assistant for {identity.dealership} (LMCT {identity.lmct}). "
-        f"I'm working with {identity.agent} from our team, and you can ask for a person at any point."
+        f"I'm an automated assistant working with {identity.agent} from our team, and you can ask "
+        "for a person anytime."
     )
 
 
-SMS_OPT_OUT = "Reply STOP any time and I'll leave you alone."
+SMS_OPT_OUT = "Reply STOP to opt out."
 
 
 def opening(
@@ -79,17 +88,22 @@ def opening(
 ) -> str:
     """`by_sms` is a cold text to the number on the listing: the seller never contacted us, so it
     says where the number came from, and the Spam Act 2003 wants a way to stop it in the same
-    message. On Messenger the seller wrote first, from our own invite, and needs neither."""
-    first = (seller_name or "").split(" ")[0] or "there"
+    message. On Messenger the seller wrote first, from our own invite, and needs neither.
+
+    Who and why come first, then the disclosure, then one question on its own line: the client's
+    first live test (15 Oct) found the old order, disclosure first and the purpose buried, hard to
+    follow on a phone."""
+    first = first_name(seller_name)
     vehicle = _vehicle(sheet_get)
     if not sheet_get("variant") and len(variants) >= 2:
         first_ask = f"Is it the {variants[0]} or the {variants[1]}?"
+    who = f"Hi {first}, it's {identity.dealership} (LMCT {identity.lmct})."
     if by_sms:
         return (
-            f"Hi {first}, {disclosure(identity)}\n\nWe saw your {vehicle} listed for sale and we're "
-            f"interested. {first_ask}\n\n{SMS_OPT_OUT}"
+            f"{who} We saw your {vehicle} listed for sale and we're interested in buying it.\n\n"
+            f"{disclosure(identity)}\n\n{first_ask}\n\n{SMS_OPT_OUT}"
         )
-    return f"Hi {first}, {disclosure(identity)}\n\nWe're interested in your {vehicle}. {first_ask}"
+    return f"{who} We're interested in buying your {vehicle}.\n\n{disclosure(identity)}\n\n{first_ask}"
 
 
 def marketplace_link(page_username: str, lead_id: object) -> str:
@@ -160,7 +174,11 @@ def contradiction(field_key: str, claimed: Any, actual: Any, source: str) -> str
 def photos_partial(have: int, need: int) -> str:
     # Used to say "I need 6 in total: the six exterior angles, the interior, and the dash" — eight
     # shots counted as six. The count and the list now come from one place.
-    return f"Got {have} — could you send the rest? I need {photos_needed(need)}."
+    # Counts only: nothing here can see a photo, so it never says which shot is missing.
+    return (
+        f"Thanks, got {have} of {need}. Could you send {need - have} more? We need "
+        f"{photos_needed(need)} — whichever you haven't sent yet."
+    )
 
 
 def verification_wait(identity: Identity) -> str:
@@ -200,7 +218,7 @@ def at_ceiling(amount: float, identity: Identity) -> str:
 
 
 def accepted(identity: Identity, seller_name: str) -> str:
-    first = (seller_name or "").split(" ")[0] or "there"
+    first = first_name(seller_name)
     return f"Great — {identity.agent} will be in touch to book the inspection and confirm the details. Thanks {first}."
 
 
