@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from acqbot import business_settings
 from acqbot.config import get_settings
 from acqbot.conversation.transitions import escalate
 from acqbot.enrichment.catalog import segment_for
@@ -55,10 +56,12 @@ def is_manual(valuation: Valuation | None) -> bool:
     return valuation is not None and valuation.engine_version == MANUAL_ENGINE_VERSION
 
 
-def engine_config_from_settings() -> EngineConfig:
+def engine_config_from_settings(session: Session | None = None) -> EngineConfig:
+    """With a session, the console's margin (if one was set) overrides the .env default."""
     s = get_settings()
+    margin = business_settings.effective(session, s).target_margin_pct if session else s.target_margin_pct
     return EngineConfig(
-        target_margin_pct=s.target_margin_pct,
+        target_margin_pct=margin,
         target_margin_by_segment=dict(s.target_margin_by_segment),
         transport_cost_aud=s.transport_cost_aud,
         ladder_opening=s.ladder_opening,
@@ -193,7 +196,7 @@ def compute_valuation(session: Session, lead_id: uuid.UUID, *, persist: bool = T
         _latest_market(session, lead_id, MarketDataKind.GUIDE),
         _latest_market(session, lead_id, MarketDataKind.COMPS),
     )
-    result = engine.compute(v, m, engine_config_from_settings())
+    result = engine.compute(v, m, engine_config_from_settings(session))
     basis = determine_basis(sheet)
 
     row = Valuation(

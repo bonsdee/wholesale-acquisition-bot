@@ -1,0 +1,15 @@
+.env
+.env.*
+.venv
+.git
+**/__pycache__
+.pytest_cache
+.ruff_cache
+tests
+fixtures
+scripts
+docs
+Claude outputs
+review*.md
+*.pdf
+*.png

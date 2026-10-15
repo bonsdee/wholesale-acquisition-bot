@@ -1073,3 +1073,112 @@ def do_link(request: Request, thread_id: uuid.UUID, lead_id: str = Form(...)) ->
         detail = getattr(exc, "detail", None) or "That is not a lead id."
         return _redirect("/console/threads", flash=str(detail), bad=True)
     return _redirect("/console/threads", flash="Linked.")
+
+
+# ------------------------------------------------------------------------------- settings
+
+
+def _dial(
+    name: str, label: str, value: float, lo: float, hi: float, step: float, unit: str, default: str
+) -> str:
+    """A slider with a number box beside it. The box carries the value, so it works without script."""
+    sync_box = f"this.form.elements['{name}'].value=this.value"
+    sync_slider = f"this.form.elements['{name}_dial'].value=this.value"
+    return (
+        f'<div class="card"><div class="title">{esc(label)}</div>'
+        f'<div class="row" style="margin-top:8px">'
+        f'<input type="range" name="{name}_dial" min="{lo:g}" max="{hi:g}" step="{step:g}" value="{value:g}" '
+        f'oninput="{sync_box}" class="grow" aria-label="{esc(label)} slider">'
+        f'<input type="number" name="{name}" min="{lo:g}" max="{hi:g}" step="any" value="{value:g}" '
+        f'oninput="{sync_slider}" style="width:9em" aria-label="{esc(label)}"> {esc(unit)}</div>'
+        f'<p class="sub" style="margin:6px 0 0">Default from config: {esc(default)}</p></div>'
+    )
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request) -> HTMLResponse:
+    _guard(request)
+    from acqbot import business_settings as bs
+
+    cfg = get_settings()
+    with session_scope() as s:
+        eff = bs.effective(s, cfg)
+        rows = bs.history(s)
+        past = "".join(
+            f"<tr><td>{esc(ago(r.changed_at))}</td><td>{esc(bs.SPECS[r.key].label)}</td>"
+            f'<td class="num">'
+            + (f"{float(r.value) * 100:g}%" if r.key == bs.MARGIN.key else money(r.value))
+            + f"</td><td>{esc(r.changed_by)}</td></tr>"
+            for r in rows
+        )
+    segment_note = (
+        '<p class="sub">Some vehicle types have their own margin set in config '
+        f"({esc(', '.join(f'{k} {v * 100:g}%' for k, v in cfg.target_margin_by_segment.items()))}); "
+        "those still apply to that type.</p>"
+        if cfg.target_margin_by_segment
+        else ""
+    )
+    body = (
+        "<h2>Settings</h2>"
+        '<p class="sub">Changes apply to new leads and new valuations. Offers already made keep their '
+        "figures, and every valuation records the margin it used.</p>"
+        '<form method="post" action="/console/settings">'
+        + _dial(
+            "high_value_threshold_aud",
+            "High-value threshold — asking prices above this go to a person",
+            eff.high_value_threshold_aud,
+            bs.THRESHOLD.minimum,
+            bs.THRESHOLD.maximum,
+            bs.THRESHOLD.step,
+            "AUD",
+            money(cfg.high_value_threshold_aud),
+        )
+        + _dial(
+            "target_margin_pct",
+            "Target margin — taken off the adjusted value before the offer ladder",
+            round(eff.target_margin_pct * 100, 2),
+            bs.MARGIN.minimum * 100,
+            bs.MARGIN.maximum * 100,
+            bs.MARGIN.step * 100,
+            "%",
+            f"{cfg.target_margin_pct * 100:g}%",
+        )
+        + segment_note
+        + '<div class="row" style="margin-top:10px"><input name="by" placeholder="Your name" required>'
+        '<button type="submit">Save</button></div></form>'
+        "<h2>Changes</h2>"
+        + (
+            '<table><thead><tr><th scope="col">When</th><th scope="col">Setting</th>'
+            f'<th scope="col" class="num">Value</th><th scope="col">By</th></tr></thead><tbody>{past}</tbody></table>'
+            if past
+            else '<p class="empty">No changes yet — the defaults from config are in force.</p>'
+        )
+    )
+    return HTMLResponse(_page("Settings", body, request))
+
+
+@router.post("/settings")
+def do_settings(
+    request: Request,
+    high_value_threshold_aud: str = Form(...),
+    target_margin_pct: str = Form(...),
+    by: str = Form(...),
+) -> Any:
+    _guard(request)
+    from acqbot import business_settings as bs
+
+    try:
+        threshold = float(high_value_threshold_aud.replace(",", "").strip())
+        margin = float(target_margin_pct.replace("%", "").strip()) / 100
+    except ValueError:
+        return _redirect("/console/settings", flash="Both settings need to be numbers.", bad=True)
+    try:
+        with session_scope() as s:
+            changed = [
+                bs.change(s, bs.THRESHOLD.key, threshold, by),
+                bs.change(s, bs.MARGIN.key, round(margin, 4), by),
+            ]
+    except ValueError as exc:
+        return _redirect("/console/settings", flash=str(exc), bad=True)
+    note = "Saved." if any(changed) else "Nothing changed."
+    return _redirect("/console/settings", flash=note)

@@ -27,6 +27,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from acqbot import business_settings
 from acqbot.config import get_settings
 from acqbot.conversation.transitions import escalate, transition
 from acqbot.enrichment.protocols import ProviderError, Providers, VehicleHint
@@ -229,13 +230,9 @@ def enrich_lead(session: Session, lead_id: uuid.UUID, providers: Providers | Non
 
     # --- escalation triggers that can fire before contact (Section 5.2) ---
     asking = int(payload["vehicle_claimed"]["asking_price_aud"])
-    if asking > settings.high_value_threshold_aud:
-        escalate(
-            session,
-            lead,
-            "high_value",
-            {"asking_price_aud": asking, "threshold": settings.high_value_threshold_aud},
-        )
+    threshold = business_settings.effective(session, settings).high_value_threshold_aud
+    if asking > threshold:
+        escalate(session, lead, "high_value", {"asking_price_aud": asking, "threshold": threshold})
         summary["escalated"] = "high_value"
 
     summary["contradictions"] = contradictions

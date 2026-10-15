@@ -417,6 +417,21 @@ class AgentAssignment(Base):
     __table_args__ = (Index("ix_agent_assignments_agent", "agent"),)
 
 
+class BusinessSetting(Base):
+    """A business parameter changed from the console. The latest row per key is in force; older
+    rows are the record of who moved the margin or the threshold, and when."""
+
+    __tablename__ = "business_settings"
+
+    setting_id: Mapped[uuid.UUID] = _uuid_pk()
+    key: Mapped[str] = mapped_column(String(64), nullable=False)
+    value: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False)
+    changed_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    changed_at: Mapped[datetime] = _now()
+
+    __table_args__ = (Index("ix_business_settings_key_changed", "key", "changed_at"),)
+
+
 IMMUTABLE_TABLES = (
     "messages",
     "state_log",
@@ -425,6 +440,7 @@ IMMUTABLE_TABLES = (
     "lead_duplicates",
     "model_calls",
     "agent_assignments",
+    "business_settings",
 )
 
 # A conversation nobody is waiting on any more. Used by the console to grey a row out, and by the

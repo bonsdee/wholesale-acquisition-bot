@@ -277,7 +277,7 @@ def page(
             "<header><h1>Acquisition console</h1>"
             '<nav><a href="/console">Queue</a><a href="/console/leads/new">Add lead</a>'
             '<a href="/console/handoffs">Handoffs</a>'
-            '<a href="/console/threads">Unlinked</a></nav><span class="spacer"></span>'
+            '<a href="/console/threads">Unlinked</a><a href="/console/settings">Settings</a></nav><span class="spacer"></span>'
             '<form class="inline" method="post" action="/console/logout">'
             '<button class="ghost" type="submit">Sign out</button></form></header>'
         )
