@@ -48,6 +48,11 @@ REASONS: dict[str, tuple[str, str]] = {
         "The number on this listing is already talking to us about another car, so no text was sent. "
         "Contact them yourself, or close the other lead first.",
     ),
+    "sms_number_opted_out": (
+        "Seller said STOP before",
+        "Someone on this number replied STOP to us, so the bot will not text them. Only contact them "
+        "if they reached out to you first.",
+    ),
     "ceiling_approval": (
         "Ceiling needs your approval",
         "The automated steps are spent and the seller is still within the ceiling. Approve it or hold.",

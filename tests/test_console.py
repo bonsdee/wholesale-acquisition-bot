@@ -251,3 +251,16 @@ def test_closing_a_lead_stops_it_and_empties_its_tasks(signed_in):
     assert "Asked for a person" not in signed_in.get("/console").text
     again = signed_in.post(f"/console/leads/{lead_id}/close", data={"by": "Earl"})
     assert "already%20closed" in again.headers["location"]
+
+
+def test_number_in_use_links_to_the_lead_holding_the_number(signed_in):
+    first = run_demo("clean", "bot_question", seed=42, human_presents=False, model="off")
+    second = run_demo("clean", "bot_question", seed=43, human_presents=False, model="off")
+    with session_scope() as s:
+        s.add(
+            Escalation(
+                lead_id=second.lead_id, reason="sms_number_in_use", details={"other_lead": str(first.lead_id)}
+            )
+        )
+    page = signed_in.get(f"/console/leads/{second.lead_id}").text
+    assert f'href="/console/leads/{first.lead_id}"' in page and "Open the other lead" in page

@@ -654,6 +654,7 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
                 f'<div class="sub">{esc(what)}</div></div>'
                 f'<span class="meta">{esc(ago(e.at))}</span></div>'
                 + _ceiling_block(lead_id, e)
+                + _other_lead_link(e)
                 + f'<form class="inline" method="post" action="/console/escalations/{e.escalation_id}/resolve" '
                 f'style="margin-top:10px">'
                 f'<input type="hidden" name="lead_id" value="{lead_id}">'
@@ -846,6 +847,21 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
             + f"{pics}</div>"
         )
     return HTMLResponse(_page(vehicle, "".join(out), request))
+
+
+def _other_lead_link(e: Escalation) -> str:
+    """For "seller already in a chat": the way to the conversation that holds the number."""
+    other = (e.details or {}).get("other_lead") if e.reason == "sms_number_in_use" else None
+    try:
+        other_id = uuid.UUID(str(other)) if other else None
+    except ValueError:
+        return ""
+    if other_id is None:
+        return ""
+    return (
+        f'<p class="sub" style="margin-top:8px"><a href="/console/leads/{other_id}">Open the other lead →</a>'
+        " Close it there if it is finished, then add this car again.</p>"
+    )
 
 
 def _dt(iso: str | None) -> datetime | None:
