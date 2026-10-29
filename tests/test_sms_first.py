@@ -139,3 +139,36 @@ def test_a_number_already_in_another_chat_goes_to_a_person_not_a_second_opening(
     with session_scope() as s:
         reasons = [e.reason for e in s.scalars(select(Escalation).where(Escalation.lead_id == second))]
     assert reasons == ["sms_number_in_use"]
+
+
+def test_a_finished_conversation_frees_the_number_for_the_next_car(sms):
+    from acqbot.conversation.transitions import transition
+
+    first = _new_lead(37)
+    with session_scope() as s:
+        transition(s, s.get(Lead, first), LeadState.ARCHIVED, "test")
+    sms.outbox.clear()
+    second = _new_lead(38)
+    assert _state(second) == LeadState.CONTACTED and len(sms.outbox) == 1
+    with session_scope() as s:
+        thread = s.scalars(select(Thread).where(Thread.external_id == PHONE)).one()
+        assert thread.lead_id == second
+        # The first car's messages stay with the first car.
+        assert {
+            m.lead_id for m in s.scalars(select(Message).where(Message.thread_id == thread.thread_id))
+        } == {
+            first,
+            second,
+        }
+
+
+def test_a_seller_who_said_stop_is_never_cold_texted_again(sms):
+    first = _new_lead(39)
+    _reply("STOP")
+    assert _state(first) == LeadState.ARCHIVED
+    sms.outbox.clear()
+    second = _new_lead(40)
+    assert sms.outbox == [] and _state(second) == LeadState.NEW
+    with session_scope() as s:
+        reasons = [e.reason for e in s.scalars(select(Escalation).where(Escalation.lead_id == second))]
+    assert reasons == ["sms_number_opted_out"]

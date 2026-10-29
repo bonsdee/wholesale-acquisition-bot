@@ -121,10 +121,13 @@ def test_webhook_lead_is_ingested_linked_and_synced(client, fake):
     # A workflow that fires twice lands on the same lead.
     again = client.post("/webhooks/ghl?token=tok", json=webhook())
     assert again.status_code == 200 and again.json()["status"] == "idempotent"
+    # The same contact with another car is another lead.
+    other = client.post("/webhooks/ghl?token=tok", json=webhook(Make="Mazda", Model="3"))
+    assert other.status_code == 201 and other.json()["lead_id"] != str(lead_id)
 
     drain(kinds=["ghl_sync"])
     assert fake.find("POST", "/contacts/upsert") == []  # the contact already exists in GHL
-    (opp,) = fake.find("POST", "/opportunities/")
+    opp, _mazda = fake.find("POST", "/opportunities/")  # one opportunity per car
     assert opp["pipelineId"] == "pl-1" and opp["contactId"] == "c-42"
     assert opp["pipelineStageId"] == stage_id("New Lead") and opp["status"] == "open"
     assert opp["name"] == "2018 Toyota Corolla" and opp["monetaryValue"] == 18500

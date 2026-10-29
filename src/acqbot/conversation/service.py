@@ -68,6 +68,7 @@ from acqbot.models import (
     Message,
     Offer,
     OfferOutcome,
+    StateLog,
     Thread,
     Valuation,
     ValuationBasis,
@@ -1697,6 +1698,27 @@ def listing_phone(lead: Lead) -> str | None:
         return None
 
 
+# Over and done: a returning seller's new car may take the number. HANDOFF and ACCEPTED are not here —
+# a person is still mid-deal with them, and a cold opening on top of that would be worse than waiting.
+_FINISHED_STATES = frozenset({LeadState.REJECTED, LeadState.ARCHIVED, LeadState.TERMINATED})
+
+
+def _opted_out(session: Session, thread: Thread) -> bool:
+    """Whether anyone on this number ever replied STOP, on any car."""
+    leads = select(Message.lead_id).where(Message.thread_id == thread.thread_id, Message.lead_id.is_not(None))
+    return (
+        session.scalar(
+            select(func.count())
+            .select_from(StateLog)
+            .where(
+                StateLog.trigger == "seller_opt_out",
+                (StateLog.lead_id.in_(leads)) | (StateLog.lead_id == thread.lead_id),
+            )
+        )
+        or 0
+    ) > 0
+
+
 def _start_on_sms(session: Session, lead: Lead) -> tuple[Conversation, Thread] | None:
     """First contact by text, for a dealership with Twilio but no Messenger (first_contact=sms).
 
@@ -1720,11 +1742,21 @@ def _start_on_sms(session: Session, lead: Lead) -> tuple[Conversation, Thread] |
     thread = session.scalars(
         select(Thread).where(Thread.channel == Channel.SMS, Thread.external_id == phone)
     ).first()
-    if thread is not None and thread.lead_id not in (None, lead.lead_id):
-        # One thread per number: this seller is already talking to us about another car. A second
-        # cold opening into that conversation would confuse both; a person decides.
-        create_task(session, lead, "sms_number_in_use", {"phone": phone, "other_lead": str(thread.lead_id)})
+    if thread is not None and _opted_out(session, thread):
+        # They told us to stop on this number. A new car does not undo that; a person decides.
+        create_task(session, lead, "sms_number_opted_out", {"phone": phone})
         return None
+    if thread is not None and thread.lead_id not in (None, lead.lead_id):
+        other = session.get(Lead, thread.lead_id)
+        if other is None or other.state not in _FINISHED_STATES:
+            # One thread per number: this seller is already talking to us about another car. A second
+            # cold opening into that conversation would confuse both; a person decides.
+            create_task(
+                session, lead, "sms_number_in_use", {"phone": phone, "other_lead": str(thread.lead_id)}
+            )
+            return None
+        # The earlier conversation is over, so the number moves to this car. Old messages keep their
+        # own lead_id, so neither the history nor the model's context mixes the two cars.
     if thread is None:
         thread = Thread(channel=Channel.SMS, external_id=phone, lead_id=lead.lead_id)
         session.add(thread)

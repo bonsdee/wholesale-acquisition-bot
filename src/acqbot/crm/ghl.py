@@ -36,8 +36,8 @@ log = logging.getLogger("acqbot.ghl")
 
 API_VERSION = "2021-07-28"
 INBOUND_TOKEN_HEADER = "X-Acqbot-Token"
-# Lead ids for GHL contacts are derived, not random, so a workflow that fires twice for the same
-# contact lands on the same lead (ingestion is idempotent on lead_id).
+# Lead ids for GHL contacts are derived from the contact and the car, not random, so a workflow that
+# fires twice for the same submission lands on the same lead (ingestion is idempotent on lead_id).
 _LEAD_NAMESPACE = uuid.UUID("6f1c2a52-5d1e-4b7a-9a43-3f0d2c8e9b11")
 
 # Stage names as created in the "Car Acquisition" pipeline. Several bot states share a stage: the
@@ -376,9 +376,11 @@ def lead_from_webhook(payload: dict[str, Any], settings: Settings) -> tuple[dict
         or "Seller"
     )
     state = fields["rego_state"].upper()
+    # Same contact, same car → same lead (a workflow that fires twice). Same contact, another car → a new one.
+    car_key = "|".join(fields[k].strip().lower() for k in ("make", "model")) + f"|{numbers['year']}"
     lead = {
         "schema_version": "1.0",
-        "lead_id": str(uuid.uuid5(_LEAD_NAMESPACE, f"ghl:{location_id}:{contact_id}")),
+        "lead_id": str(uuid.uuid5(_LEAD_NAMESPACE, f"ghl:{location_id}:{contact_id}:{car_key}")),
         "source": "ghl",
         "listing_url": fields["listing_url"]
         or f"https://app.gohighlevel.com/v2/location/{location_id}/contacts/detail/{contact_id}",
