@@ -128,6 +128,16 @@ class GhlClient:
         data = self._call("POST", "/opportunities/", json={"locationId": self.location_id, **body})
         return data["opportunity"]["id"]
 
+    def find_opportunity(self, contact_id: str, pipeline_id: str) -> str | None:
+        """The contact's existing opportunity in this pipeline, newest first, if any."""
+        data = self._call(
+            "GET",
+            "/opportunities/search",
+            params={"location_id": self.location_id, "contact_id": contact_id, "pipeline_id": pipeline_id},
+        )
+        opps = data.get("opportunities") or []
+        return opps[0]["id"] if opps else None
+
     def update_opportunity(self, opportunity_id: str, body: dict[str, Any]) -> None:
         self._call("PUT", f"/opportunities/{opportunity_id}", json=body)
 
@@ -261,9 +271,18 @@ def sync_lead(session: Session, lead_id: uuid.UUID, client: GhlClient | None = N
         sheet = fact_sheet(session, lead.lead_id)
         car = " ".join(str(x) for x in (sheet.get("year"), sheet.get("make"), sheet.get("model")) if x)
         opp.setdefault("pipelineStageId", stages.get(STAGE_FOR_STATE[LeadState.NEW].lower()))
-        link.opportunity_id = client.create_opportunity(
-            {"pipelineId": pipeline_id, "contactId": link.contact_id, "name": car or "Vehicle", **opp}
-        )
+        body = {"pipelineId": pipeline_id, "contactId": link.contact_id, "name": car or "Vehicle", **opp}
+        try:
+            link.opportunity_id = client.create_opportunity(body)
+        except GhlError:
+            # GHL allows one opportunity per contact per pipeline unless the sub-account says otherwise,
+            # so a seller's second car is refused. Take over their existing card: it then shows the car
+            # they are selling now. Anything else that went wrong still fails the job.
+            existing = client.find_opportunity(link.contact_id, pipeline_id)
+            if existing is None:
+                raise
+            link.opportunity_id = existing
+            client.update_opportunity(existing, {"pipelineId": pipeline_id, "name": body["name"], **opp})
     else:
         client.update_opportunity(link.opportunity_id, {"pipelineId": pipeline_id, **opp})
 

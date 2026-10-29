@@ -33,6 +33,8 @@ STAGES = [
 class FakeGhl:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict]] = []
+        self.created: list[dict] = []
+        self.one_per_contact = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -53,7 +55,16 @@ class FakeGhl:
         if path == "/contacts/upsert":
             return httpx.Response(200, json={"contact": {"id": "c-upserted"}})
         if path == "/opportunities/" and request.method == "POST":
-            return httpx.Response(201, json={"opportunity": {"id": "opp-1"}})
+            if self.one_per_contact and any(
+                b.get("contactId") == body.get("contactId") for b in self.created
+            ):
+                return httpx.Response(
+                    400, json={"message": "Can not create duplicate opportunity for the contact."}
+                )
+            self.created.append(body)
+            return httpx.Response(201, json={"opportunity": {"id": f"opp-{len(self.created)}"}})
+        if path == "/opportunities/search":
+            return httpx.Response(200, json={"opportunities": [{"id": "opp-1"}]})
         return httpx.Response(200, json={})
 
     def find(self, method: str, prefix: str) -> list[dict]:
@@ -196,3 +207,16 @@ def test_nothing_is_queued_without_ghl(session, settings_env):
     transition(session, session.get(Lead, lead_id), LeadState.CONTACTED, "test")
     session.commit()
     assert ghl_jobs() == 0
+
+
+def test_a_second_car_takes_over_the_contacts_card_when_ghl_allows_only_one(client, fake):
+    fake.one_per_contact = True
+    client.post("/webhooks/ghl?token=tok", json=webhook())
+    second = uuid.UUID(
+        client.post("/webhooks/ghl?token=tok", json=webhook(Make="Mazda", Model="3")).json()["lead_id"]
+    )
+    drain(kinds=["ghl_sync"])
+    with session_scope() as s:
+        assert s.get(CrmLink, second).opportunity_id == "opp-1"
+        assert s.query(Job).filter(Job.kind == "ghl_sync", Job.status != "done").count() == 0
+    assert fake.find("PUT", "/opportunities/opp-1")[-1]["name"] == "2018 Mazda 3"
