@@ -432,6 +432,26 @@ class BusinessSetting(Base):
     __table_args__ = (Index("ix_business_settings_key_changed", "key", "changed_at"),)
 
 
+class CrmLink(Base):
+    """The GoHighLevel contact and opportunity a lead is mirrored to.
+
+    Mutable on purpose: it is a pointer, like threads, and its history lives in state_log. One row
+    per lead; a contact can carry more than one lead (the same seller, another car)."""
+
+    __tablename__ = "crm_links"
+
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leads.lead_id"), primary_key=True
+    )
+    contact_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    opportunity_id: Mapped[str | None] = mapped_column(String(64))
+    synced_state: Mapped[LeadState | None] = mapped_column(LEAD_STATE_T)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _now()
+
+    __table_args__ = (Index("ix_crm_links_contact", "contact_id"),)
+
+
 IMMUTABLE_TABLES = (
     "messages",
     "state_log",

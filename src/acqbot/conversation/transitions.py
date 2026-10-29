@@ -31,6 +31,9 @@ def transition(
     )
     lead.state = to_state
     session.flush()
+    from acqbot.crm.ghl import schedule_sync
+
+    schedule_sync(session, lead)  # the dealership's GHL board follows the lead; no-op when unconfigured
     return True
 
 

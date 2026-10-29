@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     history_summary_batch: int = 10  # re-summarise once this many turns have fallen out of the window
     fact_min_confidence: float = 0.7  # model-extracted facts below this are not recorded; we ask again
 
+    # GoHighLevel CRM (Direct Auto sub-account). Empty api key = no sync; empty inbound token = the
+    # /webhooks/ghl intake answers 404. The bot keeps texting through Twilio either way: GHL is the
+    # dealership's view of the pipeline, not a second channel to the seller.
+    ghl_api_key: str = ""  # Private Integration token, created inside the sub-account
+    ghl_location_id: str = ""
+    ghl_inbound_token: str = ""  # shared secret the GHL workflow webhook sends back to us
+    ghl_pipeline_name: str = "Car Acquisition"
+    ghl_pipeline_id: str = ""  # optional; wins over the name when set
+    ghl_base_url: str = "https://services.leadconnectorhq.com"
+    # Public address of this app, for the console link written onto each GHL contact. Empty = no link.
+    public_base_url: str = ""
+
     # Minimal human console (admin endpoints); empty disables them
     admin_token: str = ""
 
@@ -188,6 +200,11 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         """Real sellers. Test data is refused here (see enrichment/providers.py)."""
         return self.environment.strip().lower() in {"production", "prod"}
+
+    @property
+    def ghl_enabled(self) -> bool:
+        """Whether lead state is pushed to GoHighLevel."""
+        return bool(self.ghl_api_key and self.ghl_location_id)
 
     @property
     def resolved_llm_provider(self) -> str:

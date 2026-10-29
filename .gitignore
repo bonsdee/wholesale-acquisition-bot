@@ -27,3 +27,8 @@ Thumbs.db
 # Local scratch
 *.log
 scratch/
+
+# Knowledge-graph output (graphify) and local documents — never pushed
+graphify-out/
+*.pdf
+*.png

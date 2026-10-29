@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import acqbot.conversation.service  # noqa: F401  (registers maybe_send_opening, on_priced, expire_offer)
+import acqbot.crm.ghl  # noqa: F401  (registers ghl_sync, ghl_tag_contact)
 import acqbot.enrichment.pipeline  # noqa: F401  (registers enrich_lead)
 import acqbot.valuation.service  # noqa: F401  (registers value_lead)
 

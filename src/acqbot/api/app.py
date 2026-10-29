@@ -51,6 +51,7 @@ def create_app() -> FastAPI:
                 "lead_detail": "GET /leads/{lead_id}",
                 "messenger_webhook": "GET|POST /webhooks/messenger",
                 "sms_webhook": "POST /webhooks/sms",
+                "ghl_webhook": "POST /webhooks/ghl (header: x-acqbot-token)",
                 "console": "GET /console (the screen)",
                 "admin_api": "GET /admin/escalations, GET /admin/handoffs (header: x-admin-token)",
             },
