@@ -232,3 +232,22 @@ def test_only_web_links_become_photos():
     assert "javascript" not in out and "data:" not in out
     assert "https://ok.example/a.jpg?x=&quot;&gt;&lt;b&gt;" in out  # escaped, not injected
     assert photo_grid([]) == "" and photo_grid(None) == ""
+
+
+def test_closing_a_lead_stops_it_and_empties_its_tasks(signed_in):
+    run = run_demo("clean", "bot_question", seed=42, human_presents=False, model="off")
+    lead_id = str(run.lead_id)
+    assert "Close this lead" in signed_in.get(f"/console/leads/{lead_id}").text
+
+    r = signed_in.post(f"/console/leads/{lead_id}/close", data={"by": "Earl", "reason": "test lead"})
+    assert r.status_code == 303
+    with session_scope() as s:
+        assert s.get(Lead, run.lead_id).state.value == "ARCHIVED"
+        open_tasks = s.scalars(
+            select(Escalation).where(Escalation.lead_id == run.lead_id, Escalation.resolved_at.is_(None))
+        ).all()
+        assert open_tasks == []
+    assert "Close this lead" not in signed_in.get(f"/console/leads/{lead_id}").text
+    assert "Asked for a person" not in signed_in.get("/console").text
+    again = signed_in.post(f"/console/leads/{lead_id}/close", data={"by": "Earl"})
+    assert "already%20closed" in again.headers["location"]

@@ -812,6 +812,17 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
         )
 
     # --- transcript ---
+    if not closed:
+        out.append(
+            "<h2>Close this lead</h2>"
+            f'<form class="inline" method="post" action="/console/leads/{lead_id}/close" '
+            "onsubmit=\"return confirm('Close this lead? The bot stops and it leaves every queue.')\">"
+            '<input name="reason" placeholder="Why, e.g. test lead / sold elsewhere" style="flex:1;min-width:220px">'
+            '<input name="by" placeholder="Your name" required>'
+            '<button type="submit">Close lead</button></form>'
+            '<p class="sub">The bot stops, open tasks are resolved, and the seller can be contacted '
+            "again about another car.</p>"
+        )
     out.append("<h2>Conversation</h2>")
     if not msgs:
         out.append('<p class="empty">Nothing sent yet.</p>')
@@ -872,6 +883,20 @@ def do_resolve(
     except HTTPException as exc:
         return _redirect(f"/console/leads/{lead_id}", flash=str(exc.detail), bad=True)
     return _redirect(f"/console/leads/{lead_id}", flash="Resolved.")
+
+
+@router.post("/leads/{lead_id}/close")
+def do_close(
+    request: Request, lead_id: uuid.UUID, by: str = Form(...), reason: str = Form(default="")
+) -> Any:
+    _guard(request)
+    try:
+        admin.close_lead(
+            lead_id, admin.CloseLead(by=by.strip()[:64] or "console", reason=reason.strip()[:500])
+        )
+    except HTTPException as exc:
+        return _redirect(f"/console/leads/{lead_id}", flash=str(exc.detail), bad=True)
+    return _redirect(f"/console/leads/{lead_id}", flash="Closed.")
 
 
 @router.post("/leads/{lead_id}/present-offer")

@@ -100,6 +100,35 @@ def resolve_escalation(escalation_id: uuid.UUID, body: Resolve) -> dict[str, Any
         return _esc(e)
 
 
+class CloseLead(BaseModel):
+    by: str = Field(min_length=1, max_length=64)
+    reason: str = Field(default="", max_length=500)
+
+
+# Already over; closing again would only add noise to state_log.
+_ALREADY_CLOSED = {LeadState.ARCHIVED, LeadState.REJECTED, LeadState.TERMINATED}
+
+
+@router.post("/leads/{lead_id}/close", dependencies=[Admin])
+def close_lead(lead_id: uuid.UUID, body: CloseLead) -> dict[str, Any]:
+    """A person ends a lead: a test, a car already sold elsewhere, a seller who went quiet for good.
+
+    Open tasks are resolved with the reason, so nothing is left in the queue for a lead nobody is
+    working, and the seller's number is free for their next car (see _start_on_sms)."""
+    with session_scope() as s:
+        lead = s.get(Lead, lead_id)
+        if lead is None:
+            raise HTTPException(404, "lead not found")
+        if lead.state in _ALREADY_CLOSED:
+            raise HTTPException(409, "lead is already closed")
+        reason = body.reason.strip() or "closed from the console"
+        now = datetime.now(UTC)
+        for e in s.query(Escalation).filter(Escalation.lead_id == lead_id, Escalation.resolved_at.is_(None)):
+            e.resolved_by, e.resolution, e.resolved_at = body.by, f"lead closed: {reason}", now
+        transition(s, lead, LeadState.ARCHIVED, f"closed_by:{body.by}", {"reason": reason})
+        return {"lead_id": str(lead_id), "state": lead.state.value}
+
+
 @router.get("/leads/{lead_id}/transcript", dependencies=[Admin])
 def lead_transcript(lead_id: uuid.UUID) -> dict[str, Any]:
     with session_scope() as s:
