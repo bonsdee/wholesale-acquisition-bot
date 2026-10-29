@@ -10,6 +10,7 @@ Confidence conventions for seller-sourced facts:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 LISTING_CONFIDENCE = 0.6
 STATED_CONFIDENCE = 0.9
@@ -194,8 +195,54 @@ ENRICHMENT_FIELDS: tuple[str, ...] = (
 )
 
 
+# What a person may record by hand ("Record as verified" in the console). A fixed list, not free
+# text: a typo like "odometer" used to be stored as a fact nothing reads, and the lead sat unpriced
+# while the screen said "Recorded". The PPSR answers and anything stored as a structure are left
+# out on purpose — they have their own form, which stores them in the shape the gate reads.
+MANUAL_FIELDS: dict[str, str] = {
+    "odometer_km": "Odometer (km)",
+    "keys_count": "Number of keys",
+    "service_history": "Service history (full / partial / none)",
+    "panel_paint_condition": "Panel and paint (excellent / good / fair / poor)",
+    "tyre_condition": "Tyres (new / good / worn / replace)",
+    "rego": "Registration plate",
+    "vin": "VIN",
+    "year": "Year",
+    "variant": "Variant",
+}
+
+
 def spec_for(key: str) -> FieldSpec | None:
     for f in DISCOVERY_REQUIRED + ASKED_NOT_GATING:
         if f.key == key:
             return f
     return None
+
+
+KNOWN_FIELDS: frozenset[str] = frozenset(
+    {
+        *MANUAL_FIELDS,
+        *DISCOVERY_REQUIRED_KEYS,
+        *(f.key for f in ASKED_NOT_GATING),
+        *LISTING_FIELDS,
+        *ENRICHMENT_FIELDS,
+    }
+)
+
+
+def check_manual(key: str, value: Any) -> Any:
+    """A hand-entered value in the shape the rest of the system reads, or ValueError in words a
+    salesperson can act on."""
+    if key not in KNOWN_FIELDS:
+        raise ValueError(f"'{key}' is not a field the bot uses. Pick one from the list.")
+    spec = spec_for(key)
+    if spec is not None and spec.kind == "enum":
+        word = str(value).strip().lower()
+        if word not in spec.choices:
+            raise ValueError(f"{spec.label} has to be one of: {', '.join(spec.choices)}.")
+        return word
+    if (spec is not None and spec.kind == "int") or key == "year":
+        if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+            raise ValueError(f"{MANUAL_FIELDS.get(key, key)} has to be a whole number.")
+        return int(value)
+    return value

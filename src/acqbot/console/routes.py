@@ -48,7 +48,7 @@ from acqbot.conversation import templates as T
 from acqbot.conversation.handoff import _render_fact, transcript
 from acqbot.db import session_scope
 from acqbot.enrichment.providers import KIND_LABEL, done_by_a_person, on_test_data, pricing_is_manual
-from acqbot.facts.fields import DISCOVERY_REQUIRED
+from acqbot.facts.fields import DISCOVERY_REQUIRED, MANUAL_FIELDS
 from acqbot.facts.store import fact_sheet
 from acqbot.ingestion.service import ingest_lead
 from acqbot.models import (
@@ -795,12 +795,14 @@ def lead_page(request: Request, lead_id: uuid.UUID) -> HTMLResponse:
     out.append(
         f'<div class="card" style="margin-top:12px">'
         f'<form class="inline" method="post" action="/console/leads/{lead_id}/facts">'
-        f'<input name="field" placeholder="Field, e.g. odometer_km" required>'
-        f'<input name="value" placeholder="Value" required>'
-        f'<input name="by" placeholder="Your name" required>'
-        f'<button type="submit">Record as verified</button></form>'
-        f'<p class="sub" style="margin:10px 0 0">Recorded as an inspection result and re-prices the lead. '
-        f"This is where the odometer from the dash photo goes.</p></div>"
+        f'<select name="field" required aria-label="Field">'
+        + "".join(f'<option value="{k}">{esc(label)}</option>' for k, label in MANUAL_FIELDS.items())
+        + "</select>"
+        '<input name="value" placeholder="Value" required>'
+        '<input name="by" placeholder="Your name" required>'
+        '<button type="submit">Record as verified</button></form>'
+        '<p class="sub" style="margin:10px 0 0">Recorded as an inspection result and re-prices the lead. '
+        "This is where the odometer from the dash photo goes.</p></div>"
     )
 
     if packet_json:

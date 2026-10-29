@@ -22,6 +22,7 @@ from acqbot.conversation.handoff import transcript
 from acqbot.conversation.service import Conversation
 from acqbot.conversation.transitions import transition
 from acqbot.db import session_scope
+from acqbot.facts.fields import check_manual
 from acqbot.facts.store import fact_sheet, record_fact
 from acqbot.models import (
     Escalation,
@@ -219,7 +220,11 @@ def add_fact(lead_id: uuid.UUID, body: ManualFact) -> dict[str, Any]:
     with session_scope() as s:
         if s.get(Lead, lead_id) is None:
             raise HTTPException(404, "lead not found")
-        rr = record_fact(s, lead_id, body.field, body.value, source=body.source, verified=body.verified)
+        try:
+            value = check_manual(body.field, body.value)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        rr = record_fact(s, lead_id, body.field, value, source=body.source, verified=body.verified)
         from acqbot.queue.jobs import enqueue
 
         lead = s.get(Lead, lead_id)

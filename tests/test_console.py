@@ -264,3 +264,24 @@ def test_number_in_use_links_to_the_lead_holding_the_number(signed_in):
         )
     page = signed_in.get(f"/console/leads/{second.lead_id}").text
     assert f'href="/console/leads/{first.lead_id}"' in page and "Open the other lead" in page
+
+
+def test_record_as_verified_only_takes_fields_the_bot_reads(signed_in):
+    # Found clicking through: "odometer" (no _km) said "Recorded" and the lead never priced.
+    run = run_demo("clean", "accept", seed=42, human_presents=False, model="off")
+    page = signed_in.get(f"/console/leads/{run.lead_id}").text
+    assert '<select name="field"' in page and 'value="odometer_km"' in page
+
+    def post(field, value):
+        return signed_in.post(
+            f"/console/leads/{run.lead_id}/facts", data={"field": field, "value": value, "by": "claudia"}
+        ).headers["location"]
+
+    assert "m=bad" in post("odometer", "85000")
+    assert "m=bad" in post("service_history", "Full logbook")
+    assert "m=bad" in post("keys_count", "two")
+    assert "m=ok" in post("service_history", "Full")  # case doesn't matter
+    with session_scope() as s:
+        from acqbot.facts.store import fact_sheet
+
+        assert fact_sheet(s, run.lead_id).get("service_history") == "full"
