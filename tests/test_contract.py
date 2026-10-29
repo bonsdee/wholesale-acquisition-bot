@@ -54,3 +54,12 @@ def test_unsupported_schema_version():
 def test_non_object_payload():
     with pytest.raises(LeadContractError):
         parse_lead(["not", "an", "object"])
+
+
+@pytest.mark.parametrize(
+    "raw", ["0412 345 678", "+61 412 345 678", "+61 0412 345 678", "+610412345678", "61412345678", "0061 412 345 678"]
+)
+def test_phone_formats_a_form_can_produce(raw):
+    from acqbot.contracts.lead import SellerV1
+
+    assert SellerV1(platform_id="x", display_name="y", phone=raw).phone == "+61412345678"

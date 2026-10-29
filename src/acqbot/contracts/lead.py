@@ -46,6 +46,13 @@ class SellerV1(_Strict):
         if v is None:
             return None
         digits = re.sub(r"[^\d+]", "", v)
+        if digits.startswith("0061"):
+            digits = "+" + digits[2:]
+        elif digits.startswith("61") and len(digits) == 11:
+            digits = "+" + digits
+        # A form with a +61 country picker and a "04xx" placeholder stores "+61 04xx": drop the trunk 0.
+        if digits.startswith("+610"):
+            digits = "+61" + digits[4:]
         if digits.startswith("04") and len(digits) == 10:
             digits = "+61" + digits[1:]
         if not re.fullmatch(r"\+61[2-9]\d{8}", digits):
